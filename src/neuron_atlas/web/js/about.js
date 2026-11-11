@@ -122,7 +122,7 @@ export function mount(container, ctx) {
         kv(t('about.deepTexts'), fmtInt(idx.deep_texts)),
         kv(t('about.exampleTexts'), fmtInt(idx.example_texts)),
         kv(t('about.semantic'), `${sem.method || '–'}${sem.ready ? '' : ` (${t('about.notReady')})`}`),
-        kv(t('about.fetch'), s.offline || s.allow_remote_fetch === false ? t('about.fetchOff') : t('about.fetchOn', { n: fmtInt(s.upstream_requests_per_second) }))),
+        kv(t('about.fetch'), s.can_fetch === false || s.offline || s.allow_remote_fetch === false ? t('about.fetchOff') : t('about.fetchOn', { n: fmtInt(s.upstream_requests_per_second) }))),
       h('p', null, h('button', { type: 'button', class: 'btn btn-small', onclick: () => ctx.openRegion({}) }, icon('download', 15), t('region.open'))));
   }
 

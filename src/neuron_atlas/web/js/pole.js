@@ -59,6 +59,20 @@ function cueText(text) {
   return frag;
 }
 
+/** Text with the firing token marked «like this» (the first pair of guillemets). */
+function focalText(text) {
+  const frag = document.createDocumentFragment();
+  const m = /\u00ab([^\u00ab\u00bb]*)\u00bb/.exec(text);
+  if (!m) {
+    frag.appendChild(document.createTextNode(text));
+    return frag;
+  }
+  frag.appendChild(document.createTextNode(text.slice(0, m.index)));
+  frag.appendChild(h('span', { class: 'tok tok-focal tok-plainfocal' }, m[1]));
+  frag.appendChild(document.createTextNode(text.slice(m.index + m[0].length)));
+  return frag;
+}
+
 function effectMark(effect) {
   if (effect === '+' || effect === 'drives') return h('span', { class: 'effect effect-plus', title: t('circuit.drives') }, '+');
   if (effect === '-' || effect === '−' || effect === 'opposes') return h('span', { class: 'effect effect-minus', title: t('circuit.opposes') }, '−');
@@ -70,11 +84,20 @@ function memberList(members, { limit = 8 } = {}) {
   if (!items.length) return null;
   const maxW = Math.max(...items.map((m) => Math.abs(m.weight ?? 0)), 0);
   const list = h('ul', { class: 'units' });
-  const row = (m) => h('li', { class: 'unit-row' },
-    unitLink(m.unit, m.in_atlas),
-    m.weight != null ? h('span', { class: `unit-weight ${m.weight < 0 ? 'neg' : 'pos'}`, title: t('circuit.weight') }, (m.weight > 0 ? '+' : m.weight < 0 ? '−' : '') + fmtSig(Math.abs(m.weight), 2)) : null,
-    m.weight != null && maxW > 0 ? bar(Math.abs(m.weight), { max: maxW, cls: m.weight < 0 ? 'bar-neg' : 'bar-pos' }) : null,
-    m.label ? h('span', { class: 'unit-label', title: m.label }, m.label) : null);
+  const row = (m) => {
+    const tips = [t('circuit.weight')];
+    if (m.weight_lane) tips.push(`${t('circuit.lane')}: ${m.weight_lane}`);
+    if (typeof m.gate === 'number') tips.push(`gate ${fmtSig(m.gate, 2)}`);
+    if (typeof m.up === 'number') tips.push(`up ${fmtSig(m.up, 2)}`);
+    if (m.layers_ahead != null) tips.push(t('circuit.layersAhead', { n: m.layers_ahead }));
+    return h('li', { class: 'unit-row' },
+      h('span', { class: 'unit-id' },
+        m.pole === 'pos' || m.pole === 'neg' ? h('span', { class: `sign sign-${m.pole}`, title: m.pole === 'neg' ? t('pole.neg') : t('pole.pos') }, m.pole === 'neg' ? '−' : '+') : null,
+        unitLink(m.unit, m.in_atlas)),
+      m.weight != null ? h('span', { class: 'unit-weight', title: tips.join(' · ') }, (m.weight > 0 ? '+' : m.weight < 0 ? '−' : '') + fmtSig(Math.abs(m.weight), 2), m.weight_lane ? h('span', { class: 'unit-lane' }, ` ${m.weight_lane}`) : null) : null,
+      m.weight != null && maxW > 0 ? bar(Math.abs(m.weight), { max: maxW }) : null,
+      m.label ? h('span', { class: 'unit-label', title: m.label }, m.label) : null);
+  };
   items.slice(0, limit).forEach((m) => list.appendChild(row(m)));
   if (items.length > limit) {
     const more = h('button', { type: 'button', class: 'linkish no-print' }, t('showMore', { n: items.length - limit }));
@@ -100,26 +123,43 @@ export function renderCircuit(circuit) {
   const line = typeof c.line === 'string' ? c.line : typeof c.note === 'string' ? c.note : '';
   if (!inputs.length && !readers.length && !tokens.length && !line && !notes.length) return null;
 
+  const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + fmtSig(Math.abs(v), 2);
   const group = (g, kind) => {
     const meta = [];
-    if (g.role) meta.push(String(g.role));
+    if (g.role) meta.push(t(`circuit.role.${g.role}`, null, String(g.role)));
     if (g.lane) meta.push(`${t('circuit.lane')}: ${g.lane}`);
+    if (typeof g.gate === 'number') meta.push(`gate ${signed(g.gate)}`);
+    if (typeof g.up === 'number') meta.push(`up ${signed(g.up)}`);
     if (typeof g.share === 'number') meta.push(`${t('circuit.share')} ${fmtPct(g.share, 0)}`);
+    if (g.examples != null) meta.push(t('circuit.examples', { n: fmtInt(g.examples) }));
+    if (g.measured_direction) meta.push(t('circuit.measured', { dir: t(`circuit.dir.${g.measured_direction}`, null, String(g.measured_direction)) }));
     const n = g.n_members ?? g.n;
     if (n != null) meta.push(t('circuit.members', { n: fmtInt(n) }));
-    return h('li', { class: `cgroup cgroup-${kind}` },
-      h('div', { class: 'cgroup-head' }, effectMark(g.effect), h('span', { class: 'cgroup-name' }, g.name || '–'), meta.length ? h('span', { class: 'muted cgroup-meta' }, meta.join(' · ')) : null),
+    const about = Array.isArray(g.about) ? g.about.filter((a) => a && typeof a === 'object' && a.name) : [];
+    return h('li', { class: `cgroup cgroup-${kind}`, id: g.id ? `cg-${g.id}` : null },
+      h('div', { class: 'cgroup-head' }, effectMark(g.effect), h('span', { class: 'cgroup-name' }, g.name || '–')),
+      meta.length ? h('div', { class: 'muted cgroup-meta' }, meta.join(' · ')) : null,
       g.description ? h('p', { class: 'cgroup-desc' }, g.description) : null,
-      memberList(g.members));
+      about.length ? h('ul', { class: 'cgroup-about' }, about.map((a) => h('li', { title: a.description || null }, a.name, a.n != null ? h('span', { class: 'muted' }, ` (${fmtInt(a.n)})`) : null))) : null,
+      memberList(g.members, { limit: 4 }));
   };
   const maxTok = Math.max(...tokens.map((x) => Math.abs(x.weight ?? 0)), 0);
+  const contexts = Array.isArray(c.strongest_contexts) ? c.strongest_contexts.filter((x) => x && typeof x.text === 'string') : [];
+  const facts = [];
+  if (c.examples_analysed != null) facts.push([t('circuit.examplesAnalysed'), fmtInt(c.examples_analysed)]);
+  if (typeof c.threshold === 'number') facts.push([t('circuit.threshold'), fmtNum(c.threshold, 4), true]);
   return h('div', { class: 'circuit' },
     line ? h('p', { class: 'circuit-line' }, line) : null,
+    facts.length ? h('dl', { class: 'kvs kvs-compact' }, facts.map(([k, v, raw]) => h('div', { class: 'kv' }, h('dt', { class: raw ? 'kv-raw' : null }, k), h('dd', null, v)))) : null,
     h('div', { class: 'circuit-cols' },
       inputs.length ? h('section', null, h('h4', null, t('circuit.inputs'), h('span', { class: 'count' }, fmtInt(inputs.length))), h('ul', { class: 'cgroups' }, inputs.map((g) => group(g, 'input')))) : null,
       readers.length ? h('section', null, h('h4', null, t('circuit.readers'), h('span', { class: 'count' }, fmtInt(readers.length))), h('ul', { class: 'cgroups' }, readers.map((g) => group(g, 'reader')))) : null),
     tokens.length ? h('section', null, h('h4', null, t('circuit.outputTokens')),
       h('ul', { class: 'out-tokens' }, tokens.map((x) => h('li', null, h('code', { class: 'out-token' }, x.token ?? ''), x.weight != null ? h('span', { class: 'num muted' }, fmtSig(x.weight, 3)) : null, x.weight != null ? bar(Math.abs(x.weight), { max: maxTok }) : null)))) : null,
+    contexts.length ? h('section', null, h('h4', null, t('circuit.contexts')),
+      h('ul', { class: `contexts example-${c.pole === 'neg' ? 'neg' : 'pos'}` }, contexts.map((x) => h('li', null,
+        h('span', { class: 'cue-text' }, focalText(x.text)),
+        typeof x.activation === 'number' ? h('span', { class: 'num muted' }, fmtNum(x.activation, 2)) : null)))) : null,
     notes.length ? h('ul', { class: 'notes' }, notes.map((n) => h('li', null, n))) : null);
 }
 
@@ -391,7 +431,7 @@ export function mount(container, ctx) {
       // A server that runs offline cannot fetch: say so instead of offering a button that fails.
       ctx.infoReady.then((info) => {
         const st = (info && info.settings) || {};
-        if (st.offline === true || st.allow_remote_fetch === false) {
+        if (st.can_mirror === false || st.offline === true || st.allow_remote_fetch === false) {
           btn.disabled = true;
           hint.textContent = t('source.offline');
         }

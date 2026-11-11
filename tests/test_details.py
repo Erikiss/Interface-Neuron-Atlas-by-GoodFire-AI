@@ -144,7 +144,10 @@ def test_circuit_view_per_pole(atlas, upstream):
 
 def test_neuron_view_and_errors(atlas):
     n = atlas.neuron("L4/E1/N10", ["circuit"])
-    assert [p.pole for p in n.poles] == ["pos", "neg"] and n.circuit["inputs"]
+    assert [p.pole for p in n.poles] == ["pos", "neg"]
+    # The two poles have different inputs: g1/g2 feed the positive pole, g3 and the catch-all the negative one.
+    assert [g["id"] for g in n.circuits["pos"]["inputs"]] == ["g1", "g2"]
+    assert [g["id"] for g in n.circuits["neg"]["inputs"]] == ["g3", "g_single_no"]
     assert n.circuit_summary["n_ex"] == 210
     lonely = atlas.neuron("L2_E5_N6")
     assert lonely.poles == [] and not lonely.in_atlas_index

@@ -21,6 +21,9 @@ def test_info_glossary_and_llms_txt(client):
     text = client.get("/llms.txt").text
     assert "http://testserver/api/v1/search" in text and text.startswith("# Neuron Atlas Interface")
     assert client.get("/healthz").json()["ok"] is True
+    assert info["settings"]["can_fetch"] is True and info["settings"]["can_mirror"] is True
+    static = client.get("/static/index.html")
+    assert static.status_code == 200 and static.headers["cache-control"] == "no-cache"
 
 
 def test_search_get_and_post_agree(client):
@@ -35,7 +38,8 @@ def test_search_get_and_post_agree(client):
 def test_bad_requests_are_explained(client):
     r = client.get("/api/v1/search", params={"cat": "purple"})
     assert r.status_code == 400 and "categories" in r.json()["detail"]
-    assert client.get("/api/v1/search", params={"q": "has:nonsense"}).status_code == 400
+    inline = client.get("/api/v1/search", params={"q": "has:nonsense"})
+    assert inline.status_code == 400 and "has.0" in inline.json()["detail"] and "pydantic" not in inline.json()["detail"]
     assert client.get("/api/v1/search", params={"layer": "four"}).status_code == 400
     assert client.get("/api/v1/search", params={"limit": 999999}).status_code == 422
     assert client.get("/api/v1/poles/L4_E1_N10").json()["error"] == "bad_request"
@@ -65,7 +69,7 @@ def test_pole_in_every_format(client):
 
 def test_neuron_batch_similar_random(client):
     n = client.get("/api/v1/neurons/L4_E1_N10", params={"include": "circuit"}).json()
-    assert len(n["poles"]) == 2 and n["circuit"]["readers"]
+    assert len(n["poles"]) == 2 and set(n["circuits"]) == {"pos", "neg"} and n["circuits"]["pos"]["readers"]
     assert client.get("/api/v1/neurons/L4_E1_N10/raw/meta").json()["schema"]
     assert client.get("/api/v1/neurons/L4_E1_N10", params={"format": "md"}).text.startswith("#")
     batch = client.post("/api/v1/poles/batch", json={"ids": ["L4_E1_N10", "zzz"], "include": ["modes"]}).json()

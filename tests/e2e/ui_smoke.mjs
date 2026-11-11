@@ -197,6 +197,32 @@ async function main() {
     await page.waitForSelector('.hit-pole mark', { timeout: 8000 });
   }, page);
 
+  await check('a deep link restores every control and is sent to the API unchanged', async () => {
+    const link = '#/search?q=fish*&match=substring&scope=labels&layer=4,9..14&cat=mono,poly&has=overview&modes_min=1&sim_max=1&sample=public&sort=layer&order=desc&group_by=mode';
+    const [request] = await Promise.all([
+      page.waitForRequest((r) => r.url().includes('/api/v1/search?') && r.url().includes('offset=0') && r.url().includes('group_by=mode'), { timeout: 8000 }),
+      page.goto(`${BASE}/${link}`),
+    ]);
+    const sent = new URL(request.url()).searchParams;
+    const expected = { q: 'fish*', match: 'substring', scope: 'labels', layer: '4,9,10,11,12,13,14', cat: 'mono,poly', has: 'overview', modes_min: '1', sim_max: '1', sample: 'public', sort: 'layer', order: 'desc', group_by: 'mode' };
+    for (const [k, v] of Object.entries(expected)) assert(sent.get(k) === v, `API parameter ${k} is ${sent.get(k)}, expected ${v}`);
+    await page.waitForFunction(() => !document.querySelector('.results.is-loading'));
+    const ui = await page.evaluate(() => ({
+      q: document.getElementById('q').value,
+      match: document.querySelector('[data-name="match"][aria-checked="true"]').dataset.value,
+      group: document.querySelector('[data-name="group"][aria-checked="true"]').dataset.value,
+      sample: document.querySelector('[data-name="sample"][aria-checked="true"]').dataset.value,
+      layers: [...document.querySelectorAll('.layer-btn[aria-pressed="true"]')].length,
+      cats: [...document.querySelectorAll('.filters .check-count input:checked')].length,
+      chips: document.querySelectorAll('.chips .chip').length,
+      sort: document.querySelector('.sort-opt select').value,
+    }));
+    assert(ui.q === 'fish*' && ui.match === 'substring' && ui.group === 'mode' && ui.sample === 'public' && ui.sort === 'layer', `controls not restored: ${JSON.stringify(ui)}`);
+    assert(ui.cats === 2 && ui.layers >= 2 && ui.chips >= 6, `filters not restored: ${JSON.stringify(ui)}`);
+    await page.locator('.filters-head .btn').click();
+    await page.waitForFunction(() => location.hash === '#/search', null, { timeout: 5000 });
+  }, page);
+
   await check('load more appends the next page (next_offset)', async () => {
     await page.goto(`${BASE}/#/search?sort=id`);
     await page.waitForSelector('.hit-pole');
@@ -256,6 +282,43 @@ async function main() {
     await page.waitForTimeout(150);
     await tok.hover();
     await page.waitForFunction(() => !document.getElementById('tooltip').hidden, null, { timeout: 3000 });
+  }, page);
+
+  await check('untrusted text never becomes markup (tokens, Markdown reports)', async () => {
+    const res = await page.evaluate(async () => {
+      const { renderExample } = await import('/static/js/tokens.js');
+      const { renderMarkdown } = await import('/static/js/markdown.js');
+      window.__xss = 0;
+      const evil = '<img src=x onerror="window.__xss=1"><script>window.__xss=1</' + 'script>';
+      const ex = renderExample({ source: 'subcircuit', ref: 'c0:0', group: 'strongest', a_rel: 3.2, closed_gate: true, held_out: true, repeats: 4, text: '', pre: evil + '\nline two',
+        focal_index: 2, tokens: [[evil, 1.5], ['\n\n', 0.2], ['', 3.0], ['\u0000\u0007\u0085', null], ['\u2824\u28ff', -2.0], ['\u65e5\u672c\u8a9e', 0.01], [' tab\there', null]] }, { pole: 'neg', vmax: 3 });
+      const md = renderMarkdown(`# Title ${evil}\n\nText with **bold**, *em*, \`code ${evil}\` and [a link](https://example.org) and [bad](javascript:alert(1)).\n\n- one\n  - nested L30_E47_N449 stays_plain\n- two\n\n| a | b |\n|---|---|\n| 1 | ${evil} |\n\n\`\`\`\n${evil}\n\`\`\`\n> quote`);
+      document.body.append(ex, md);
+      await new Promise((r) => setTimeout(r, 50));
+      const out = {
+        xss: window.__xss,
+        bad: ex.querySelectorAll('img, script').length + md.querySelectorAll('img, script').length,
+        toks: ex.querySelectorAll('.tok').length,
+        focalEmpty: ex.querySelector('.tok-focal').classList.contains('tok-empty'),
+        unrouted: ex.querySelectorAll('.tok-unrouted').length,
+        newline: ex.querySelectorAll('.nl').length,
+        text: ex.querySelector('.ex-text').textContent,
+        tags: ex.querySelector('.ex-head').textContent,
+        otherPole: ex.querySelectorAll('.tok')[0].style.backgroundColor,
+        ownPole: ex.querySelectorAll('.tok')[4].style.backgroundColor,
+        md: { h: md.querySelectorAll('.md-h').length, strong: md.querySelectorAll('strong').length, li: md.querySelectorAll('li').length, nested: md.querySelectorAll('li ul').length, td: md.querySelectorAll('td').length, pre: md.querySelectorAll('pre').length, links: [...md.querySelectorAll('a')].map((a) => a.getAttribute('href')), em: md.querySelectorAll('em').length, quote: md.querySelectorAll('blockquote').length },
+      };
+      ex.remove();
+      md.remove();
+      return out;
+    });
+    assert(res.xss === 0 && res.bad === 0, 'markup from data was executed or parsed');
+    assert(res.toks === 7 && res.focalEmpty && res.unrouted === 2 && res.newline === 2, `token rendering off: ${JSON.stringify(res)}`);
+    assert(res.text.includes('<img src=x') && res.text.includes('\u65e5\u672c\u8a9e') && res.text.includes('\u2824'), 'token text not preserved');
+    assert(/Q4/.test(res.tags) && /held-out/.test(res.tags) && /4/.test(res.tags) && /3,2|3\.2/.test(res.tags), `example tags missing: ${res.tags}`);
+    assert(/224, 86, 27/.test(res.otherPole) && /51, 105, 138/.test(res.ownPole), `pole colours wrong: own ${res.ownPole}, other ${res.otherPole}`);
+    assert(res.md.h === 1 && res.md.strong === 1 && res.md.em === 1 && res.md.li === 3 && res.md.nested === 1 && res.md.td === 2 && res.md.pre === 1 && res.md.quote === 1, `Markdown structure off: ${JSON.stringify(res.md)}`);
+    assert(res.md.links.length === 1 && res.md.links[0] === 'https://example.org', `unsafe link rendered: ${res.md.links}`);
   }, page);
 
   await check('copy as Markdown puts the pole on the clipboard and confirms', async () => {
@@ -495,26 +558,31 @@ async function main() {
 
   await check('neuron graph: layered picture whose nodes link to their neuron pages', async () => {
     const did = POLE.replace(/__(pos|neg)$/, '');
+    // a neighbour that really has a page in this release, so that following the link works
+    const listed = await (await page.request.get(`${BASE}/api/v1/search?limit=3&sort=id`)).json();
+    const other = listed.hits.map((hit) => hit.did).find((d) => d !== did);
     await page.route('**/api/v1/graph/*', (route) => route.fulfill({ json: { center: did, nodes: [
       { id: did, layer: 30, label: 'centre', in_atlas: true, mirrored: true, distance: 0 },
-      { id: 'L18_E253_N170', layer: 18, label: 'an input', in_atlas: true, mirrored: false, distance: 1 },
+      { id: other, layer: 18, label: 'an input', in_atlas: true, mirrored: false, distance: 1 },
       { id: 'L22_E11_N3', layer: 22, label: 'not in the atlas', in_atlas: false, mirrored: false, distance: 1 },
       { id: 'L36_E66_N43', layer: 36, label: 'a reader', in_atlas: true, mirrored: false, distance: 1 },
     ], edges: [
-      { source: 'L18_E253_N170', target: did, weight: 0.012, sign: '+', kind: 'gate' },
+      { source: other, target: did, weight: 0.012, sign: '+', kind: 'gate' },
+      { source: other, target: did, weight: 0.006, sign: '+', kind: 'up' },
       { source: 'L22_E11_N3', target: did, weight: 0.004, sign: '-', kind: 'up' },
       { source: did, target: 'L36_E66_N43', weight: 0.001, sign: '+', kind: 'reader' },
     ], notes: ['mocked'] } }));
     await page.goto(`${BASE}/#/neuron/${did}`);
     await page.waitForSelector('svg.graph .gnode', { timeout: 10000 });
     assert(await count(page, 'svg.graph .gnode') === 4, 'expected four nodes');
-    assert(await count(page, 'svg.graph path.edge') === 3, 'expected three edges');
+    assert(await count(page, 'svg.graph path.edge') === 3, 'expected three lines (parallel gate/up links are drawn as one)');
     assert(await count(page, 'svg.graph a.gnode') === 2, 'in-atlas neighbours are not links');
     const xs = await page.evaluate(() => [...document.querySelectorAll('svg.graph .gnode rect')].map((r) => Number(r.getAttribute('x'))));
     assert(new Set(xs).size === 4, 'layers are not laid out in columns');
     await page.locator('svg.graph a.gnode').first().click();
-    await page.waitForFunction(() => location.hash === '#/neuron/L18_E253_N170', null, { timeout: 5000 });
+    await page.waitForFunction((id) => location.hash === `#/neuron/${id}`, other, { timeout: 5000 });
     await page.unroute('**/api/v1/graph/*');
+    await page.waitForSelector('.pole-card', { timeout: 10000 });
   }, page);
 
   // ------------------------------------------------------------------ API key and rate limit (mocked responses)

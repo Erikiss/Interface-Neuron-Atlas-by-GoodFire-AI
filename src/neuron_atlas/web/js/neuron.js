@@ -8,9 +8,9 @@ import { neuronHash, poleHash } from './state.js';
 import { catBadge, sampleBadge, mirrorBadge, poleLink, unitLink } from './parts.js';
 import { renderCircuit } from './pole.js';
 
-const NODE_W = 158;
+const NODE_W = 146;
 const NODE_H = 40;
-const COL_GAP = 72;
+const COL_GAP = 54;
 const ROW_GAP = 10;
 const PAD = 14;
 const HEAD = 26;
@@ -31,17 +31,30 @@ function truncate(text, n) {
 export function renderGraph(graph, centerId) {
   const nodes = (graph.nodes || []).filter((n) => n && n.id);
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  const edges = (graph.edges || []).filter((e) => e && byId.has(e.source) && byId.has(e.target));
+  const rawEdges = (graph.edges || []).filter((e) => e && byId.has(e.source) && byId.has(e.target));
   if (!nodes.length) return null;
 
+  // Two neurons can be linked several times (gate and up, either pole): one line per pair,
+  // as wide as the strongest link, with every link named in the tooltip.
+  const pairs = new Map();
   const strength = new Map();
   let maxW = 0;
-  for (const e of edges) {
+  for (const e of rawEdges) {
     const w = Math.abs(Number(e.weight) || 0);
+    const negative = e.sign === '-' || e.sign === '−' || Number(e.weight) < 0;
     if (w > maxW) maxW = w;
     strength.set(e.source, Math.max(strength.get(e.source) || 0, w));
     strength.set(e.target, Math.max(strength.get(e.target) || 0, w));
+    const key = `${e.source}>${e.target}`;
+    let pair = pairs.get(key);
+    if (!pair) pairs.set(key, (pair = { source: e.source, target: e.target, weight: -1, negative: false, parts: [] }));
+    pair.parts.push(`${e.kind || ''}${e.group ? ` (${e.group})` : ''} ${negative ? '−' : '+'}${fmtSig(w, 3)}`.trim());
+    if (w > pair.weight) {
+      pair.weight = w;
+      pair.negative = negative;
+    }
   }
+  const edges = [...pairs.values()];
   const layers = [...new Set(nodes.map(layerOf))].sort((a, b) => a - b);
   const columns = layers.map((layer) => {
     const all = nodes.filter((n) => layerOf(n) === layer).sort((a, b) =>
@@ -60,7 +73,7 @@ export function renderGraph(graph, centerId) {
     col.shown.forEach((n, ri) => pos.set(n.id, { x: col.x, y: top + ri * (NODE_H + ROW_GAP), col: ci }));
   });
 
-  const root = svg('svg', { class: 'graph', viewBox: `0 0 ${width} ${height}`, width, height, role: 'group', 'aria-label': t('graph.aria', { n: nodes.length, e: edges.length }) });
+  const root = svg('svg', { class: 'graph', viewBox: `0 0 ${width} ${height}`, width, height, role: 'group', 'aria-label': t('graph.aria', { n: nodes.length, e: rawEdges.length }) });
   const edgeLayer = svg('g', { class: 'graph-edges' });
   const nodeLayer = svg('g', { class: 'graph-nodes' });
   const edgeEls = [];
@@ -85,11 +98,11 @@ export function renderGraph(graph, centerId) {
       const x = a.x + NODE_W;
       d = `M${x} ${y1}C${x + 34} ${y1} ${x + 34} ${y2} ${x} ${y2}`;
     }
-    const w = Math.abs(Number(e.weight) || 0);
-    const negative = e.sign === '-' || e.sign === '−' || Number(e.weight) < 0;
+    const w = e.weight;
+    const negative = e.negative;
     const el = svg('path', {
       d, class: `edge ${negative ? 'edge-neg' : 'edge-pos'}`, 'stroke-width': (0.9 + (maxW > 0 ? (w / maxW) * 2.6 : 0)).toFixed(2), fill: 'none',
-      dataset: { s: e.source, t: e.target, tip: `${displayId(e.source)} → ${displayId(e.target)}${e.kind ? ` · ${e.kind}` : ''} · ${negative ? '−' : '+'}${fmtSig(w, 3)}` },
+      dataset: { s: e.source, t: e.target, tip: `${displayId(e.source)} → ${displayId(e.target)}\n${e.parts.slice(0, 6).join('\n')}` },
     });
     edgeEls.push(el);
     edgeLayer.appendChild(el);
@@ -106,7 +119,7 @@ export function renderGraph(graph, centerId) {
       const inner = [
         svg('rect', { x: p.x, y: p.y, width: NODE_W, height: NODE_H, rx: 6 }),
         svg('text', { class: 'gnode-id', x: p.x + 9, y: p.y + 16 }, displayId(n.id)),
-        svg('text', { class: 'gnode-label', x: p.x + 9, y: p.y + 31 }, truncate(n.label || (n.in_atlas ? '' : t('unit.notInAtlasShort')), 27)),
+        svg('text', { class: 'gnode-label', x: p.x + 9, y: p.y + 31 }, truncate(n.label || (n.in_atlas ? '' : t('unit.notInAtlasShort')), 25)),
       ];
       const el = n.in_atlas && !isCenter
         ? svg('a', { class: cls, href: neuronHash(n.id), dataset: { id: n.id, tip }, 'aria-label': `${displayId(n.id)} ${n.label || ''}` }, inner)
@@ -149,8 +162,13 @@ function graphTables(graph) {
       h('thead', null, h('tr', null, h('th', { scope: 'col' }, t('graph.node')), h('th', { scope: 'col', class: 'num' }, t('pole.layer')), h('th', { scope: 'col', class: 'num' }, t('graph.distance')), h('th', { scope: 'col' }, t('graph.label')))),
       h('tbody', null, nodes.map((n) => h('tr', null, h('td', null, unitLink(n.id, n.in_atlas)), h('td', { class: 'num' }, layerOf(n) >= 0 ? fmtInt(layerOf(n)) : '–'), h('td', { class: 'num' }, n.distance ?? '–'), h('td', null, n.label || '')))))),
     edges.length ? h('div', { class: 'table-scroll' }, h('table', { class: 'table table-compact' },
-      h('thead', null, h('tr', null, h('th', { scope: 'col' }, t('graph.source')), h('th', { scope: 'col' }, t('graph.target')), h('th', { scope: 'col' }, t('graph.kind')), h('th', { scope: 'col', class: 'num' }, t('circuit.weight')))),
-      h('tbody', null, edges.map((e) => h('tr', null, h('td', { class: 'mono' }, displayId(e.source)), h('td', { class: 'mono' }, displayId(e.target)), h('td', null, e.kind || ''), h('td', { class: 'num' }, `${e.sign === '-' || Number(e.weight) < 0 ? '−' : '+'}${fmtSig(Math.abs(Number(e.weight) || 0), 3)}`)))))) : null);
+      h('thead', null, h('tr', null, h('th', { scope: 'col' }, t('graph.source')), h('th', { scope: 'col' }, t('graph.target')), h('th', { scope: 'col' }, t('graph.kind')), h('th', { scope: 'col' }, t('graph.group')), h('th', { scope: 'col', class: 'num' }, t('circuit.weight')))),
+      h('tbody', null, edges.map((e) => h('tr', null,
+        h('td', { class: 'mono' }, e.source_pole ? `${e.source_pole === 'neg' ? '−' : '+'} ` : '', displayId(e.source)),
+        h('td', { class: 'mono' }, e.target_pole ? `${e.target_pole === 'neg' ? '−' : '+'} ` : '', displayId(e.target)),
+        h('td', null, [e.kind, e.role].filter(Boolean).join(' · ')),
+        h('td', null, e.group || ''),
+        h('td', { class: 'num' }, `${e.sign === '-' || Number(e.weight) < 0 ? '−' : '+'}${fmtSig(Math.abs(Number(e.weight) || 0), 3)}`)))))) : null);
 }
 
 function poleCard(p) {
@@ -212,8 +230,11 @@ export function mount(container, ctx) {
           summary.map(([k, v]) => h('div', { class: 'kv' }, h('dt', null, k), h('dd', null, v && typeof v === 'object' ? Object.entries(v).map(([a, b]) => `${a} ${b}`).join(' · ') : typeof v === 'number' ? fmtNum(v, 3) : String(v))))));
       const poles = n.poles || [];
       replace(polesBox, poles.length ? poles.map(poleCard) : notice('info', t('neuron.noPoles'), h('p', null, t('neuron.noPolesText'))));
-      const circuit = renderCircuit(n.circuit);
-      replace(circuitBox, circuit ? [h('h2', { class: 'section-title' }, t('tab.circuit')), circuit] : null);
+      // The two poles have different inputs, readers and output tokens: show the circuit of each.
+      const sides = [['pos', t('pole.pos')], ['neg', t('pole.neg')]]
+        .map(([key, name]) => [name, renderCircuit((n.circuits || {})[key])])
+        .filter(([, body]) => body);
+      replace(circuitBox, sides.flatMap(([name, body]) => [h('h2', { class: 'section-title' }, t('neuron.circuitOf', { pole: name })), body]));
       const notes = (n.notes || []).filter(Boolean);
       if (notes.length) circuitBox.appendChild(h('ul', { class: 'notes' }, notes.map((x) => h('li', null, x))));
       checkClamps(root);

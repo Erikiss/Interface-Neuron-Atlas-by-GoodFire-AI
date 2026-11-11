@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from .catalog import CATEGORIES, Catalog, PoleEntry
 from .ids import parse_reference
 from .models import (
@@ -222,8 +224,9 @@ def parse_query(query: SearchQuery) -> ParsedQuery:
     # Re-validate what the inline filters wrote (rejects e.g. has:nonsense with a clear error).
     try:
         parsed.query = q = SearchQuery.model_validate(q.model_dump())
-    except Exception as exc:  # pydantic.ValidationError
-        raise ValueError(f"invalid inline filter: {exc}") from exc
+    except ValidationError as exc:
+        problems = "; ".join(f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in exc.errors())
+        raise ValueError(f"invalid inline filter ({problems})") from None
     text = " ".join(text.split())
     parsed.text = text
     if not text:

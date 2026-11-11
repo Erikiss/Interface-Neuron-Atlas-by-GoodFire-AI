@@ -399,7 +399,6 @@ class NeuronDetail(_Model):
     circuit_label: str = ""
     circuit_summary: dict[str, Any] | None = None
     poles: list[PoleHit] = Field(default_factory=list)
-    circuit: dict[str, Any] | None = Field(None, description="Circuit of the positive pole (see `circuits` for both).")
     circuits: dict[str, dict[str, Any]] | None = Field(
         None, description="With include=circuit: the circuit of each pole, keyed 'pos' and 'neg'."
     )

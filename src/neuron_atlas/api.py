@@ -538,7 +538,7 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         return HTMLResponse(render.pole_html(detail))
 
     if WEB_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+        app.mount("/static", _RevalidatedStatic(directory=WEB_DIR), name="static")
 
         @app.get("/", include_in_schema=False)
         def index() -> Response:
@@ -555,6 +555,15 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         app.mount("/", mcp_app)
 
     return app
+
+
+class _RevalidatedStatic(StaticFiles):
+    """Static files that browsers must revalidate (ETag), so an upgrade never mixes old and new modules."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _warm(atlas: Atlas) -> None:

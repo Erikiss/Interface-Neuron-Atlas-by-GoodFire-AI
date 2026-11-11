@@ -88,7 +88,7 @@ function setTokenText(el, text) {
   });
 }
 
-function tokenSpan(text, value, { sign, vmax, focal }) {
+function tokenSpan(text, value, { sign, vmax, focal, unit }) {
   const el = document.createElement('span');
   el.className = 'tok';
   setTokenText(el, String(text ?? ''));
@@ -108,7 +108,8 @@ function tokenSpan(text, value, { sign, vmax, focal }) {
         if (a * 0.6 > 0.12) el.classList.add('tok-lit');
       }
     }
-    el.dataset.tip = `${literal(String(text ?? ''))} · ${fmtNum(value, 3)}`;
+    // 'theta': multiples of the pole's threshold; 'raw': raw activation (island examples).
+    el.dataset.tip = `${literal(String(text ?? ''))} · ${fmtNum(value, 3)}${unit === 'theta' ? ' × θ' : unit === 'raw' ? ` (${t('ex.rawUnit')})` : ''}`;
   }
   if (focal) el.classList.add('tok-focal');
   return el;
@@ -132,7 +133,7 @@ function renderTokens(ex, opts) {
     const to = expanded ? tokens.length : Math.min(tokens.length, focal + WINDOW_AFTER + 1);
     if (from > 0) box.appendChild(h('span', { class: 'ex-ellipsis', 'aria-hidden': 'true' }, '… '));
     const frag = document.createDocumentFragment();
-    for (let i = from; i < to; i++) frag.appendChild(tokenSpan(tokens[i][0], tokens[i][1], { ...opts, focal: i === focal }));
+    for (let i = from; i < to; i++) frag.appendChild(tokenSpan(tokens[i][0], tokens[i][1], { ...opts, unit: ex.token_unit, focal: i === focal }));
     box.appendChild(frag);
     if (to < tokens.length) box.appendChild(h('span', { class: 'ex-ellipsis', 'aria-hidden': 'true' }, ' …'));
     if (long) {

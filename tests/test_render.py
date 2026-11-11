@@ -686,14 +686,16 @@ def test_neuron_markdown_puts_both_poles_one_after_the_other():
     detail = NeuronDetail(
         did="L7_E3_N42", display="L7/E3/N42", layer=7, expert=3, neuron=42, in_atlas_index=True,
         circuit_label="Kettle after 'the'.", circuit_summary={"n_ex": 299, "verdict": {"+": "mono", "-": "unresolved"}, "dark": ""},
-        poles=[make_hit("pos"), make_hit("neg", headline="Teapot lids alone")], circuit=CIRCUIT, notes=["Circuit mirrored today."],
+        poles=[make_hit("pos"), make_hit("neg", headline="Teapot lids alone")],
+        circuits={"pos": CIRCUIT, "neg": {**CIRCUIT, "pole": "neg"}}, notes=["Circuit mirrored today."],
     )  # fmt: skip
     md = render.neuron_markdown(detail)
     assert md.startswith("# Neuron — L7/E3/N42\n\nid `L7_E3_N42` · layer 7 / expert 3 / neuron 42 · listed in the atlas\n")
     assert "**Circuit label.** Kettle after 'the'." in md and "| n ex | 299 |" in md and "| verdict | +: mono, -: unresolved |" in md
     assert "dark" not in md
     first, second = md.index("## + L7/E3/N42 — Words for kettles"), md.index("## − L7/E3/N42 — Teapot lids alone")
-    assert first < second < md.index("## Circuit") < md.index("## Notes") < md.index("Source: Qwen3.6 Neuron Atlas by Goodfire")
+    positive, negative = md.index("## Circuit of the positive pole"), md.index("## Circuit of the negative pole")
+    assert first < second < positive < negative < md.index("## Notes") < md.index("Source: Qwen3.6 Neuron Atlas by Goodfire")
     assert "- Circuit mirrored today." in md and "### Inputs" in md
     unread = NeuronDetail(did="L1_E1_N1", display="L1/E1/N1", layer=1, expert=1, neuron=1, in_atlas_index=False)
     assert "not listed in the atlas" in render.neuron_markdown(unread) and "No pole of this neuron" in render.neuron_markdown(unread)

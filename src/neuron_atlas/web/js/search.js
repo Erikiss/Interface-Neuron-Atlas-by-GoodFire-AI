@@ -373,8 +373,8 @@ export function mount(container, ctx) {
 
   // ------------------------------------------------------------------ rendering
 
-  function matchList(matches, { skipField } = {}) {
-    const ms = (matches || []).filter((m) => m && m.text && m.field !== skipField);
+  function matchList(matches, { skipFields = [] } = {}) {
+    const ms = (matches || []).filter((m) => m && m.text && !skipFields.includes(m.field));
     if (!ms.length) return null;
     const row = (m) => h('li', { class: 'match' },
       h('span', { class: 'match-field' }, t(`field.${m.field}`, null, m.field),
@@ -412,7 +412,7 @@ export function mount(container, ctx) {
         h('span', { class: 'hit-badges' }, sampleBadge(hit), mirrorBadge(hit))),
       showHeadline ? h('p', { class: 'hit-headline' }, h('a', { class: 'hit-title', href: poleHash(hit.pid), tabindex: '-1' }, highlight(hit.headline))) : null,
       hit.description ? clampText(highlight(hit.description), { lines: 2, moreLabel: t('more'), lessLabel: t('less'), cls: 'hit-desc' }) : null,
-      matchList(hit.matches, { skipField: 'description' }));
+      matchList(hit.matches, { skipFields: showHeadline ? ['description', 'headline'] : ['description'] }));
   }
 
   function modeRow(hit) {
@@ -423,7 +423,7 @@ export function mount(container, ctx) {
         catBadge(hit.category),
         hit.share != null ? h('span', { class: 'meta share-meta' }, bar(hit.share), h('strong', null, fmtPct(hit.share)), ' ', t('mode.shareOf')) : null),
       h('p', { class: 'hit-modelabel' }, h('a', { class: 'hit-title', href: poleHash(hit.pid, { mode: hit.mode_index }), tabindex: '-1' }, highlight(hit.label))),
-      matchList(hit.matches, { skipField: 'mode' }));
+      matchList(hit.matches, { skipFields: ['mode'] }));
   }
 
   function neuronRow(hit) {
@@ -436,7 +436,7 @@ export function mount(container, ctx) {
       h('div', { class: 'neuron-poles' }, (hit.poles || []).map((p) => h('div', { class: `subhit subhit-${p.pole}` },
         h('div', { class: 'hit-head' }, poleLink(p.pid, p.pole), catBadge(p.category, p.category_words), metaBits(p), h('span', { class: 'hit-badges' }, sampleBadge(p), mirrorBadge(p))),
         p.description ? clampText(highlight(p.description), { lines: 2, moreLabel: t('more'), lessLabel: t('less'), cls: 'hit-desc' }) : null,
-        matchList(p.matches, { skipField: 'description' })))));
+        matchList(p.matches, { skipFields: ['description'] })))));
   }
 
   // Rows are plain text (easy to select and copy); the id and the title are the links.
@@ -493,7 +493,7 @@ export function mount(container, ctx) {
       exportBtn,
       h('button', { type: 'button', class: 'btn btn-small', dataset: { action: 'region' }, onclick: () => ctx.openRegion({ state, mode: 'search' }) }, icon('download', 14), t('region.open')),
       h('a', { class: 'btn btn-small', href: buildHash('map', '', filterParams(state)) }, icon('map', 14), t('search.onMap')),
-      h('a', { class: 'btn btn-small', href: apiUrl('/api/v1/search', { ...stateToParams(state), limit: PAGE }, { withKey: false }), target: '_blank', rel: 'noopener', title: t('search.apiTip') }, icon('code', 14), 'API'));
+      h('a', { class: 'btn btn-small', href: apiUrl('/api/v1/search', { ...stateToParams(state), limit: PAGE }), target: '_blank', rel: 'noopener', title: t('search.apiTip') }, icon('code', 14), 'API'));
 
     const noteItems = data.notes.map((n) => h('li', null, n));
     // Filters the server read out of the query text (layer:30 cat:fn …) are echoed back.

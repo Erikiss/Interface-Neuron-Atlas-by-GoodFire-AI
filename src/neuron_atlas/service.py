@@ -434,6 +434,9 @@ class Atlas:
             "settings": {
                 "offline": self.settings.offline,
                 "allow_remote_fetch": self.settings.allow_remote_fetch,
+                "can_fetch": self.source.can_fetch(),
+                "can_mirror": self.source.can_fetch() and self.settings.allow_mirror,
+                "max_mirror_poles": self.settings.max_mirror_poles,
                 "upstream_requests_per_second": self.settings.requests_per_second,
                 "max_page_size": self.settings.max_page_size,
                 "max_batch_size": self.settings.max_batch_size,

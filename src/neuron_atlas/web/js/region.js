@@ -142,7 +142,7 @@ function summariseState(state) {
 export function openRegionDialog(opts = {}) {
   const info = opts.info || {};
   const settings = info.settings || {};
-  const canFetch = !(settings.offline === true || settings.allow_remote_fetch === false);
+  const canFetch = !(settings.can_mirror === false || settings.offline === true || settings.allow_remote_fetch === false);
   const dlg = openDialog({ title: t('region.title'), cls: 'dialog-wide region-dialog', onClose: () => { stop(); } });
   let planAbort = null;
   let unsub = null;

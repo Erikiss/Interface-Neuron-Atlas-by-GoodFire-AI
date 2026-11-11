@@ -515,7 +515,6 @@ class Details:
                     detail.notes.append("Circuit data is not mirrored and remote fetching is disabled.")
                 if isinstance(meta, dict):
                     detail.circuits = {pole: circuit_view(meta, pole, self.catalog) for pole in ("pos", "neg")}
-                    detail.circuit = detail.circuits["pos"]
         return detail
 
     # ------------------------------------------------------------------ deep search texts

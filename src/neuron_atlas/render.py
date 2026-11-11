@@ -2068,15 +2068,12 @@ def neuron_markdown(detail: NeuronDetail) -> str:
         blocks.append(_para("No pole of this neuron has been read in this release."))
     for hit in detail.poles:
         blocks += _hit_blocks(hit, 1)
+    # The two poles have different inputs, readers and output tokens: show each.
     circuits = _dict(detail.circuits)
-    if circuits:
-        # The two poles have different inputs, readers and output tokens: show each.
-        for pole, words in (("pos", "positive"), ("neg", "negative")):
-            blocks += _circuit_blocks(
-                circuits.get(pole), pole, title=f"Circuit of the {words} pole", anchor=f"circuit-{pole}"
-            )
-    else:
-        blocks += _circuit_blocks(detail.circuit, _str(_dict(detail.circuit).get("pole")) or "pos")
+    for pole, words in (("pos", "positive"), ("neg", "negative")):
+        blocks += _circuit_blocks(
+            circuits.get(pole), pole, title=f"Circuit of the {words} pole", anchor=f"circuit-{pole}"
+        )
     blocks += _notes(detail.notes)
     blocks.append(_footer(next((hit.atlas_url for hit in detail.poles if hit.atlas_url), None)))
     return _to_markdown(blocks)
