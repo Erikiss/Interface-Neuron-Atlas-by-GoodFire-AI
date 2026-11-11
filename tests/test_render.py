@@ -540,8 +540,9 @@ def test_prose_is_escaped_but_typography_is_kept():
     assert "\n\\> not a quote\n" in md
     kinds = {token.type for token in parse_markdown(md)}
     assert not kinds & {"html_inline", "html_block", "bullet_list_open", "ordered_list_open", "blockquote_open"}
-    inline = [child for token in parse_markdown(md) if token.type == "inline" for child in token.children or []]
-    assert not [child for child in inline if child.type in ("em_open", "code_inline", "link_open") and child.level == 0][3:]
+    inline = [child.type for token in parse_markdown(md) if token.type == "inline" for child in token.children or []]
+    assert "em_open" not in inline and "code_inline" not in inline
+    assert inline.count("link_open") == 2  # the original page and the source line, nothing made of [x](y)
     html = render.pole_html(PoleDetail(pole=hit))
     assert "<b>bold" not in html and "A &lt;b&gt;bold&lt;/b&gt; *claim* with `ticks`" in html
     assert "<title>+ L7/E3/N42 — A &lt;b&gt;bold&lt;/b&gt;" in html

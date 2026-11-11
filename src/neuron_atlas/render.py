@@ -19,7 +19,8 @@ therefore always carry the same content in the same order.
 Two kinds of text come out of the atlas and they are treated differently:
 
 * *Prose* (labels, descriptions, explanations) is escaped so that nothing in it
-  is read as markup: ``|`` inside tables, ``<`` everywhere, and so on.
+  is read as markup: ``|`` inside tables, ``<`` wherever it could open a tag,
+  and so on.  « », typographic quotes and other plain characters stay as they are.
 * *Passages* are raw corpus text in any language - code, HTML, base64, binary
   shown as text.  They are never interpreted and never wrapped: Markdown puts
   them into fenced blocks whose fence is longer than any backtick run inside,
@@ -550,6 +551,7 @@ def _original_link(pole: PoleHit) -> _Para:
 
 
 def _head_blocks(detail: PoleDetail) -> list[_Block]:
+    """Title, key facts, link to the original and the descriptions of the pole as a whole."""
     p = detail.pole
     blocks: list[_Block] = [_Heading(0, _pole_title(p), kicker=_flat(p.display)), _pole_facts(p, detail), _original_link(p)]
     if _flat(p.description) and _flat(p.description) != _flat(p.headline):
@@ -595,6 +597,7 @@ def _landscape_modes(detail: PoleDetail) -> list[dict[str, Any]]:
 
 
 def _mode_blocks(detail: PoleDetail) -> list[_Block]:
+    """The modes: a table at a glance, then one section per mode with its numbers, description and examples."""
     modes = detail.modes
     if not modes:
         return []
@@ -820,6 +823,7 @@ def _landscape_blocks(detail: PoleDetail) -> list[_Block]:
 
 
 def _situation_blocks(detail: PoleDetail, view: dict[str, Any]) -> list[_Block]:
+    """The scientist's account of each mode (on single-mode poles: of each subcircuit)."""
     situations = _dicts(view.get("situations"))
     if not situations:
         return []
@@ -880,6 +884,7 @@ def _output_tokens(tokens: list[dict[str, Any]]) -> _Inline:
 
 
 def _overview_blocks(detail: PoleDetail) -> list[_Block]:
+    """The Overview: the neuron scientist's explanation, experiments, scores and report."""
     view = _dict(detail.overview)
     blocks: list[_Block] = []
     headline = _flat(view.get("headline"))
@@ -889,7 +894,7 @@ def _overview_blocks(detail: PoleDetail) -> list[_Block]:
             blocks.append(
                 _note(
                     "This is the neuron scientist's original headline; the title of this document is the atlas's "
-                    "rewritten one (“rewritten to lead with what carries the damage”)."
+                    "rewritten one (“Rewritten to lead with what carries the damage”)."
                 )
             )
     blocks += _prose(view.get("summary"))
@@ -977,6 +982,7 @@ def _ref_item(ref: NeuronRef) -> _Inline:
 
 
 def _sides_blocks(sides: CircuitSides | None) -> list[_Block]:
+    """The neurons on each side of a subcircuit's circuit as compact lists."""
     blocks: list[_Block] = []
     for key, title, meaning in _SIDES if sides else ():
         refs: list[NeuronRef] = getattr(sides, key)
@@ -987,6 +993,7 @@ def _sides_blocks(sides: CircuitSides | None) -> list[_Block]:
 
 
 def _subcircuit_blocks(detail: PoleDetail) -> list[_Block]:
+    """Every subcircuit of the pole, in the order the data gives them (largest first)."""
     subs = detail.subcircuits
     if not subs:
         return []
@@ -1002,6 +1009,7 @@ def _subcircuit_blocks(detail: PoleDetail) -> list[_Block]:
 
 
 def _one_subcircuit(s: Subcircuit, pole: str, labels: dict[int, str], names: dict[str, str]) -> list[_Block]:
+    """One subcircuit: what its firings mean, how it computes, who feeds and reads it, its examples."""
     sid = _flat(s.id)
     anchor = "sc-" + re.sub(r"[^A-Za-z0-9_-]", "", sid)
     blocks: list[_Block] = [_Heading(2, _flat(s.function_label), kicker=f"Subcircuit {sid}", anchor=anchor)]
@@ -1159,15 +1167,16 @@ def _circuit_blocks(circuit: Any, pole: str = "pos", level: int = 1) -> list[_Bl
 
 
 def _island_blocks(detail: PoleDetail) -> list[_Block]:
+    """The islands view: its own modes, then each island with its examples."""
     view = detail.islands
     if view is None or not (view.modes or view.islands):
         return []
     blocks: list[_Block] = [
         _Heading(1, "Islands (the older read)", anchor="islands", new_page=bool(view.islands)),
         _note(
-            "“We take its strongest firing examples from a large text corpus and cluster them into islands: groups "
-            "of examples that occur in similar contexts. An LLM judge then grouped islands that respond to similar "
-            "concepts in the text into modes.” These modes are not the modes of the subcircuit read above."
+            "For one pole, “we take its strongest firing examples from a large text corpus and cluster them into "
+            "islands: groups of examples that occur in similar contexts. An LLM judge then grouped islands that "
+            "respond to similar concepts in the text into modes”. These are not the modes of the subcircuit read."
         ),
     ]
     number_of = {island.id: island.number for island in view.islands}
@@ -1194,6 +1203,7 @@ def _island_blocks(detail: PoleDetail) -> list[_Block]:
 
 
 def _research_blocks(detail: PoleDetail) -> list[_Block]:
+    """The remaining upstream fields (include=research) as one JSON block."""
     extras: dict[str, Any] = {}
     if detail.research:
         extras["pole"] = detail.research
@@ -1213,6 +1223,7 @@ def _research_blocks(detail: PoleDetail) -> list[_Block]:
 
 
 def _availability_blocks(detail: PoleDetail) -> list[_Block]:
+    """Which data sets this document rests on, and the notes of the assembler."""
     blocks: list[_Block] = []
     if detail.sources:
         rows: list[list[_Cell]] = []
@@ -1313,6 +1324,7 @@ def _url(href: Any) -> str:
 
 
 def _md_inline(spans: _Inline, cell: bool = False) -> str:
+    """Inline spans as Markdown; ``cell`` escapes for a table cell instead of a paragraph."""
     parts = []
     for span in spans:
         if span.style in ("swatch", "ring"):
@@ -1382,6 +1394,8 @@ def _demoted_report(markdown: str, top: int) -> str:
 
 
 def _md_table(table: _Table) -> list[str]:
+    """A table in GitHub-flavoured Markdown."""
+
     def cell(value: _Cell) -> str:
         if isinstance(value, _Bar):
             value = value.text
@@ -1395,6 +1409,7 @@ def _md_table(table: _Table) -> list[str]:
 
 
 def _md_passage(block: _Passage) -> list[str]:
+    """An example: its header line, the context before the window, the passage in a fenced block."""
     strength, facts, ref = _example_facts(block.example)
     head = " · ".join([f"**{_md(strength)}**"] + [_md(f) for f in facts] + ([_md_code(ref)] if ref else []))
     label, context = _context(block.example)
@@ -1531,6 +1546,7 @@ def _report_blocks(markdown: str, top: int) -> list[_Block]:
 
 
 def _plain(spans: _Inline) -> str:
+    """Inline spans as plain text."""
     parts = []
     for span in spans:
         if span.style in ("swatch", "ring"):
@@ -1558,6 +1574,7 @@ def _wrap(text: str, width: int = _TEXT_WIDTH, first: str = "", rest: str = "") 
 
 def _text_table(table: _Table) -> list[str]:
     """A table as aligned columns; cells wrap inside their column so that the table fits the page."""
+
     def cell(value: _Cell) -> str:
         if isinstance(value, _Bar):
             return value.text
@@ -1597,6 +1614,7 @@ def _text_table(table: _Table) -> list[str]:
 
 
 def _text_passage(block: _Passage) -> list[str]:
+    """An example in plain text: header, then context and passage indented and otherwise untouched."""
     strength, facts, ref = _example_facts(block.example)
     lines = _wrap(" · ".join([strength, *facts, *([ref] if ref else [])]), first="  ", rest="    ")
     label, context = _context(block.example)
@@ -1610,6 +1628,7 @@ def _text_passage(block: _Passage) -> list[str]:
 
 
 def _text_heading(block: _Heading) -> list[str]:
+    """A heading: the title boxed, sections upper-cased and underlined, deeper levels underlined."""
     title = " — ".join(part for part in (_flat(block.kicker), _flat(block.text)) if part)
     if block.level == 1:
         title = title.upper()
@@ -1769,6 +1788,7 @@ def _css_string(text: str) -> str:
 
 
 def _html_inline(spans: _Inline) -> str:
+    """Inline spans as HTML; «tokens» quoted in prose are highlighted."""
     parts = []
     for span in spans:
         if span.style in ("swatch", "ring"):
@@ -1789,6 +1809,7 @@ def _html_inline(spans: _Inline) -> str:
 
 
 def _html_table(table: _Table) -> str:
+    """A table; shares get a bar, numeric columns are right-aligned."""
     aligns = (table.align + "l" * len(table.head))[: len(table.head)]
 
     def attr(i: int) -> str:
@@ -1847,6 +1868,7 @@ def _html_tokens(block: _Passage, pole: str) -> str:
 
 
 def _html_passage(block: _Passage, pole: str) -> str:
+    """An example as a figure: caption, greyed context, then the passage (shaded when it has tokens)."""
     example = block.example
     strength, facts, ref = _example_facts(example)
     caption = " · ".join([f"<b>{_h(strength)}</b>"] + [_h(f) for f in facts])
@@ -1866,6 +1888,7 @@ def _html_passage(block: _Passage, pole: str) -> str:
 
 
 def _html_legend(block: _Legend) -> str:
+    """How to read the passages: the shading, the box, the dotted and the grey text."""
     own, other = ("negative", "positive") if block.pole == "neg" else ("positive", "negative")
     parts = ["<strong>Reading the examples.</strong> Each passage is raw corpus text."]
     if block.shaded:
