@@ -60,6 +60,21 @@ def test_search_and_read(client):
     assert "L4/E1/N10" in call(client, "get_neuron", id="L4_E1_N10", include_circuit=True)
 
 
+def test_clipping_never_leaves_a_code_fence_open():
+    from neuron_atlas.mcp_server import _clip
+
+    doc = "# Title\n\nintro\n\n```text\n" + "passage line\n" * 40 + "```\n\nafter\n"
+    assert _clip(doc, 0) == doc and _clip(doc, 10_000) == doc
+    for limit in range(30, len(doc), 37):
+        clipped = _clip(doc, limit)
+        body = clipped.rsplit("\n\n[… cut at", 1)[0]
+        fences = [line for line in body.split("\n") if line.startswith("```")]
+        assert len(fences) % 2 == 0, (limit, clipped[-80:])
+        assert clipped.endswith("raise max_chars]")
+    longer = "````\ncode with ``` inside\n" + "x\n" * 50
+    assert _clip(longer, 60).split("\n\n[…")[0].endswith("````")
+
+
 def test_batch_similar_info_glossary(client):
     batch = call(client, "batch_search", queries=["braille", "chess"], limit=2)
     assert [r["total"] for r in batch["results"]] == [1, 1]

@@ -12,6 +12,7 @@ floods the context window.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import anyio
@@ -37,10 +38,32 @@ INSTRUCTIONS = (
 _DEFAULT_MAX_CHARS = 14_000
 
 
+_FENCE = re.compile(r"^(`{3,}|~{3,})")
+
+
 def _clip(text: str, max_chars: int) -> str:
+    """Cut a Markdown document to about ``max_chars`` without leaving a code fence open."""
     if max_chars <= 0 or len(text) <= max_chars:
         return text
-    return text[:max_chars].rstrip() + f"\n\n[… cut at {max_chars} characters; ask for fewer sections or examples, or raise max_chars]"
+    cut = text[:max_chars]
+    # Prefer to stop at a line end rather than in the middle of a word or a passage line.
+    newline = cut.rfind("\n")
+    if newline > max_chars * 0.6:
+        cut = cut[:newline]
+    cut = cut.rstrip()
+    fence = None  # the fence that is open at the end of the cut, if any
+    for line in cut.split("\n"):
+        m = _FENCE.match(line)
+        if not m:
+            continue
+        marker = m.group(1)
+        if fence is None:
+            fence = marker
+        elif marker[0] == fence[0] and len(marker) >= len(fence) and line.strip() == marker:
+            fence = None
+    if fence is not None:
+        cut += "\n" + fence
+    return cut + f"\n\n[… cut at {max_chars} characters; ask for fewer sections or examples, or raise max_chars]"
 
 
 def _hit(hit: Any) -> dict[str, Any]:
