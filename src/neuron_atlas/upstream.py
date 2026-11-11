@@ -784,10 +784,20 @@ class AtlasSource:
             return FetchResult(relpath, "error", error=failure)
 
         n = max(1, workers or self.settings.max_concurrency)
+        # A small window of submitted files instead of all of them: waiting on 32,000 futures at a
+        # time would make every wait() cost as much as the whole plan.
+        window = 4 * n
+        upcoming = iter(todo)
+        pending: set[Any] = set()
         pool = ThreadPoolExecutor(max_workers=n, thread_name_prefix="atlas-fetch")
         try:
-            pending = {pool.submit(one, p) for p in todo}
-            while pending:
+            while True:
+                for relpath in upcoming:
+                    pending.add(pool.submit(one, relpath))
+                    if len(pending) >= window:
+                        break
+                if not pending:
+                    break
                 done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
                 for fut in done:
                     res = fut.result()
