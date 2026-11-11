@@ -227,6 +227,31 @@ def islands_view(raw: dict[str, Any], max_examples: int = 0, with_tokens: bool =
     return view
 
 
+def align_digest(digest: dict[str, Any], circuit: dict[str, Any] | None) -> None:
+    """Make the Overview's circuit digest agree with the circuit file, where that is at hand.
+
+    The digest is stored with the Overview data, which goodfire.com's Overview
+    page never shows: its token list mixes this pole's output tokens with
+    unsigned example tokens, and its reader labels are those of the group's
+    home pole.  With the circuit file, the tokens become the checked list
+    (push on this pole's logit) and readers get their measured direction;
+    without it, ``checked`` is False and the document says so.
+    """
+    if circuit is None:
+        digest["checked"] = False
+        return
+    n = len(digest.get("output_tokens") or []) or 5
+    digest["output_tokens"] = [dict(t) for t in (circuit.get("output_tokens") or [])[:n]]
+    by_name = {str(r.get("name")): r for r in circuit.get("readers") or []}
+    for reader in digest.get("readers") or []:
+        match = by_name.get(str(reader.get("name")))
+        if match and match.get("measured_direction"):
+            reader["measured_direction"] = match["measured_direction"]
+        if match and match.get("label_of_other_pole"):
+            reader["label_of_other_pole"] = True
+    digest["checked"] = True
+
+
 class Details:
     """Builds :class:`PoleDetail` / :class:`NeuronDetail` documents and feeds the deep search index."""
 
@@ -357,6 +382,18 @@ class Details:
                 detail.circuit = circuit_view(meta, p.pole, self.catalog)
         else:
             sources["circuit"] = "not_requested" if p.has_circuit else "absent"
+
+        digest = (detail.overview or {}).get("circuit_digest")
+        if isinstance(digest, dict) and (digest.get("output_tokens") or digest.get("readers")):
+            circuit = detail.circuit
+            if circuit is None and p.has_circuit:  # only what is mirrored already: no download for this
+                try:
+                    meta = self.source.get_json(neuron_path("circuit_meta", p.did), remote=False)
+                except AtlasError:
+                    meta = None
+                if isinstance(meta, dict):
+                    circuit = circuit_view(meta, p.pole, self.catalog)
+            align_digest(digest, circuit)
 
         return detail
 

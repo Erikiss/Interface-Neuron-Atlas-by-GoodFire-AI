@@ -280,10 +280,10 @@ class Atlas:
 
     def _needs_fetch(self, pid: str) -> bool:
         from .mirror import files_of_pole
-        from .upstream import UNKNOWN
+        from .upstream import ABSENT, PRESENT
 
         paths = list(files_of_pole(self.catalog.poles[pid]).values())
-        return any(status == UNKNOWN for status in self.source.store.statuses(paths).values())
+        return any(status not in (PRESENT, ABSENT) for status in self.source.store.statuses(paths).values())
 
     def neuron(self, ref: str, include: Iterable[str] = (), *, remote: bool | None = None) -> NeuronDetail:
         return self.details.neuron(self.resolve_did(ref), include, remote=remote)
@@ -447,13 +447,11 @@ class Atlas:
 
     def plan_mirror(self, request: MirrorRequest) -> MirrorPlan:
         selection = request.selection
-        return make_plan(
-            self.catalog,
-            self.source,
-            self.select(selection),
-            request.sources,
-            circuit_neurons=self.circuit_only_neurons(selection),
-        )
+        pids = self.select(selection)
+        extra = self.circuit_only_neurons(selection)
+        if selection.max_poles is not None:  # the cap covers poles and circuit-only neurons together
+            extra = extra[: max(0, selection.max_poles - len(pids))]
+        return make_plan(self.catalog, self.source, pids, request.sources, circuit_neurons=extra)
 
     def mirror(
         self,
@@ -529,7 +527,7 @@ class Atlas:
                 "offline": self.settings.offline,
                 "allow_remote_fetch": self.settings.allow_remote_fetch,
                 "can_fetch": self.source.can_fetch(),
-                "can_mirror": self.source.can_fetch() and self.settings.allow_mirror,
+                "can_mirror": self.source.can_fetch(remote=True) and self.settings.allow_mirror,
                 "max_mirror_poles": self.settings.max_mirror_poles,
                 "upstream_requests_per_second": self.settings.requests_per_second,
                 "max_page_size": self.settings.max_page_size,

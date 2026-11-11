@@ -75,3 +75,19 @@ def test_geometry_commands(run, tmp_path):
     assert (tmp_path / "map.html").stat().st_size > 2000
     assert "1 neurons" not in run("geometry", "graph", str(tmp_path / "g.graphml")).output
     assert (tmp_path / "g.graphml").exists()
+
+
+def test_atlas_text_is_printed_as_text_not_as_markup(run, monkeypatch):
+    original = Atlas.search
+
+    def search(self, query, **kwargs):
+        res = original(self, query, **kwargs)
+        for hit in res.hits:
+            hit.headline = "Closing tags such as '</a', '[/lastfm]' and [named hazard/factor]"
+        res.notes.append("note with [/bold] in it")
+        return res
+
+    monkeypatch.setattr(Atlas, "search", search)
+    result = run("search", "braille")
+    assert result.exit_code == 0, result.output
+    assert "[/lastfm]" in result.output and "[named hazard/factor]" in result.output

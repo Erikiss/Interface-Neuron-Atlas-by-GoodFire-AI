@@ -321,7 +321,7 @@ def test_every_section_appears_in_order_when_its_data_is_present():
         "### How well the description predicts the neuron", "### Still open", "### The scientist's final description",
         "### The scientist's full report", "### Subcircuit c0 — Kettle on the stove", "belongs to mode 0 (Kettle words)",
         "**Meaning.** Kettles being put on.", "**Token pattern.**", "**Function.**", "**Gate role.**", "**Up role.**",
-        "at or above θ 50% · between 0.5 θ and θ 25% · below 0.5 θ 20% · gate closed 5.0%",
+        "gate open, at or above θ 50% · gate open, 0.5–1 θ 25% · gate open, below 0.5 θ 20% · gate closed (any strength) 5.0%",
         "- `L5_E1_N8` (+0.0164; elsewhere +0.0002) - Stoves \\[in the atlas\\]", "- `L9_E4_N1` (-0.0007)",
         "### Inputs", "### Readers", "- `L5_E1_N8` (+0.0164) - Stoves | hobs \\[in the atlas\\]", "` whistle` (+0.25)",
         "### Island 1 (id island0) — Kettles in recipes", "112 examples in the cluster; 1 shown", '"partition": "p1"',
@@ -600,7 +600,8 @@ def test_prose_is_escaped_but_typography_is_kept():
     )
     md = render.pole_markdown(PoleDetail(pole=hit))
     title = md.splitlines()[0]
-    assert "\\<b>bold\\</b> \\*claim\\* with \\`ticks\\`, a_b_c and \\_under\\_ «tok» “quoted” | piped & \\&amp; [x\\](y) 1 < 2" in title
+    # "<" and "&" as entities (a backslash is undone where a GFM autolink swallows it), the rest with backslashes.
+    assert "&lt;b>bold&lt;/b> \\*claim\\* with \\`ticks\\`, a_b_c and \\_under\\_ «tok» “quoted” | piped & &amp;amp; [x\\](y) 1 < 2" in title
     assert "**Description.** # not a heading" in md and "\n\\- not a list\n" in md and "\n1\\. not numbered\n" in md
     assert "\n\\> not a quote\n" in md
     kinds = {token.type for token in parse_markdown(md)}
@@ -637,7 +638,7 @@ def test_the_report_is_demoted_and_otherwise_verbatim():
     assert "θ = 0.38. **What it is.** A kettle detector with `regex ^kett`." in md
     assert "\n1. *First.* Kettles reach 3θ.\n2. Pots stay at 0.\n" in md
     assert "\n```\n# not a heading\n```\n" in md  # code inside the report is left alone
-    assert "A stray \\<b>tag\\</b> and 2 < 3." in md
+    assert "A stray &lt;b>tag&lt;/b> and 2 < 3." in md
     headings = [(token.tag, tokens[i + 1].content) for tokens in [parse_markdown(md)] for i, token in enumerate(tokens) if token.type == "heading_open"]
     assert ("h3", "The scientist's full report") in headings and ("h4", "L7_E3_N42 report") in headings
     assert ("h5", "Evidence") in headings and not [h for h in headings if h[0] == "h1"][1:]
@@ -982,3 +983,11 @@ def test_csv_cells_cannot_become_formulas(start):
     assert row[14][1:].replace("\n", "\r") == f"{start}HYPERLINK(1)"  # a lone CR is written as a line feed
     assert not any(cell[:1] in ("=", "+", "-", "@", "\t", "\r") for cell in row)
     assert "\x00" not in render.csv_row(make_hit(description="nul\x00byte"))
+
+
+def test_markup_in_atlas_text_stays_text_even_next_to_a_web_address():
+    """A GFM autolink takes a backslash into the address, so "<" is written as an entity."""
+    hit = make_hit(headline="Links such as https://example.org/<img src=x onerror=alert(1)> and www.x.org/<b>")
+    md = render.pole_markdown(PoleDetail(pole=hit))
+    assert "<img" not in md and "<b>" not in md and "https://example.org/&lt;img" in md
+    assert len(render._md("a" + "_" * 100_000 + "a")) > 100_000  # underscore runs: linear, not quadratic

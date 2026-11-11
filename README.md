@@ -214,12 +214,18 @@ stehen.
 - **Notbremse:** Scheitern viele Dateien hintereinander (Server blockiert, Ausfall, Login-Portal
   im Netz) oder ist die Platte voll, hört der Lauf von selbst auf und sagt warum. Bittet der
   Server um eine Pause (HTTP 429/503 mit `Retry-After`), warten alle Anfragen gemeinsam.
-- **Selbstheilung:** Beschädigte oder abgeschnittene Dateien werden erkannt und neu geholt; ein
-  verlorenes oder kaputtes Manifest wird aus den vorhandenen Dateien wieder aufgebaut.
+- **Selbstheilung:** Beschädigte oder abgeschnittene Dateien werden erkannt und durch eine frische
+  Kopie ersetzt – erst wenn diese da ist; offline bleibt die Datei liegen und die Anfrage meldet
+  „damaged“ (HTTP 503) statt still zu fehlen. Ein vorübergehender Fehler (z. B. zu viele offene
+  Dateien) betrifft nur die eine Anfrage. Ein verlorenes oder kaputtes Manifest wird aus den
+  vorhandenen Dateien wieder aufgebaut (eine volle Platte gilt nicht als „kaputt“).
 
 Über die Oberfläche („Region herunterladen“) und die API geht dasselbe als Hintergrund-Job,
 dort begrenzt durch `ATLAS_ALLOW_MIRROR` und `ATLAS_MAX_MIRROR_POLES` (Pole pro Job); höchstens
-zehn Jobs warten gleichzeitig. Ein Job, bei dem keine einzige Datei ankam, endet als „failed“.
+zehn Jobs warten gleichzeitig. Ein Job, bei dem keine einzige Datei ankam, endet als „failed“;
+hält die Notbremse einen Job an, nachdem schon Dateien da sind, endet er als „done“ mit Hinweis,
+und das Geladene wird trotzdem durchsuchbar gemacht. `--max-poles` begrenzt Pole und
+Circuit-Neuronen zusammen.
 
 ## Geometrie-Analyse
 

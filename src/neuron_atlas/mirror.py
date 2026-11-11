@@ -92,7 +92,7 @@ class MirrorPlan:
         raw = sum(TYPICAL_BYTES.get(k, (150_000, 600_000))[1] * n for k, n in kinds.items())
         return {
             "poles": len(self.poles),
-            "neurons": len(self.neurons),
+            "neurons": len(dict.fromkeys(pid.rsplit("__", 1)[0] for pid in self.poles)),  # neurons of the poles
             "circuit_only_neurons": len(self.circuit_neurons),
             "files_total": len(self.files),
             "files_present": self.present,
@@ -162,8 +162,8 @@ class MirrorReport:
 
     @property
     def nothing_worked(self) -> bool:
-        """Files were due but not one could be fetched (or the run stopped on its own)."""
-        return bool(self.stopped) or (self.failed > 0 and self.fetched == 0 and self.absent == 0)
+        """Files were due but not one could be fetched (a run that stopped early may still have fetched some)."""
+        return self.failed > 0 and self.fetched == 0 and self.absent == 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -410,10 +410,13 @@ class MirrorJobs:
                     job.state = "failed"
                     job.error = job.report.stopped or (job.report.errors[0] if job.report.errors else "no file could be fetched")
                 else:
+                    # Also after an early stop: what was fetched is kept and made searchable.
                     after = job.after or self.after
                     if after and not self._closing:
                         after(job)
                     job.state = "cancelled" if job._stop.is_set() else "done"
+                    if job.report.stopped:
+                        job.error = f"stopped early, {job.report.not_attempted:,} files not tried: {job.report.stopped}"
             except Exception as exc:  # noqa: BLE001 - a job must never kill the worker
                 job.state = "failed"
                 job.error = f"{type(exc).__name__}: {exc}"

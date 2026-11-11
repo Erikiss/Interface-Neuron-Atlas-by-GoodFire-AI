@@ -151,7 +151,11 @@ class Gate:
 
         root = scope.get("root_path") or ""
         path = scope.get("path") or ""
-        relative = path[len(root) :] if root and path.startswith(root) else path
+        # As Starlette routes: the root path counts only when a "/" (or the end) follows it.
+        if root and (path == root or path.startswith(root.rstrip("/") + "/")):
+            relative = path[len(root.rstrip("/")) :] or "/"
+        else:
+            relative = path
 
         # The liveness probe answers to any name: it carries no data, and probes often use the bare address.
         if (

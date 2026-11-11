@@ -8,6 +8,7 @@ clouds, incidence matrices) are summarised here; the geometry tools and the
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterator
 from typing import Any
@@ -355,7 +356,10 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
     for this pole (``drives`` / ``opposes``).  ``readers`` are groups of later
     neurons this pole ``raised`` or ``lowered``, with the number of examples in
     which that showed.  ``output_tokens`` are the vocabulary tokens whose
-    logits the neuron pushes most on this pole (signed static weights).
+    logits the neuron pushes most on this pole: ``weight`` is the push on the
+    logit when this pole fires (> 0 = raised, on both poles); ``static_weight``
+    is the stored static weight (negative on the negative pole, whose negative
+    activation turns it into a raise).
     ``example_tokens`` are the tokens the circuit data also follows on its
     stored examples (mostly frequent ones such as ``,`` or `` the``): their
     weight is the mean *absolute* logit effect over the examples of both poles,
@@ -370,9 +374,11 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
                       "members": [{"unit", "pole", "label", "in_atlas", "gate", "up",
                                    "weight" (the larger of gate/up by magnitude), "weight_lane"}]}],
          "readers": [{"id", "name", "description", "effect": "+"|"-", "examples", "mean_effect",
-                      "measured_direction" (only when the measurement contradicts the label), "n_members",
+                      "label_of_other_pole" (true when the group belongs to the other pole, whose label
+                      ``effect`` then is), "measured_direction" ("raised"|"lowered", when the measurement on
+                      this pole contradicts ``effect``), "n_members",
                       "members": [{"unit", "pole", "label", "in_atlas", "weight" (magnitude), "layers_ahead"}]}],
-         "output_tokens": [{"token", "weight"}],
+         "output_tokens": [{"token", "weight" (push on this pole's logit, > 0 = raised), "static_weight"}],
          "example_tokens": [{"token", "mean_abs_effect", "examples_active"}],
          "strongest_contexts": [{"text" (firing token marked «…»), "activation" (raw)}]}
 
@@ -473,10 +479,16 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
                 "n_members": len(ranked),
                 "members": [member(m, reader=True) for m in ranked[:members]],
             }
-            # A group that belongs to the other pole keeps that pole's label in the explorer;
-            # the measured mean then tells the real direction on this pole.
-            if mean is not None and mean != 0 and (mean > 0) != (item["effect"] == "+"):
-                item["measured_direction"] = "raised" if mean > 0 else "lowered"
+            # A group that belongs to the other pole keeps that pole's label in the explorer; the measured
+            # mean then tells the real direction on this pole.  The mean is rounded to 4 decimals, so a
+            # small one is stored as a signed zero - its sign is still the direction.
+            home = group_side(g)
+            if home is not None and home != sign:
+                item["label_of_other_pole"] = True
+            if mean is not None and (mean != 0 or home not in (None, sign)):
+                measured = "raised" if math.copysign(1.0, mean) > 0 else "lowered"
+                if (measured == "raised") != (item["effect"] == "+"):
+                    item["measured_direction"] = measured
             readers.append(item)
     else:
         for g in by_id.values():
@@ -507,11 +519,12 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
     logits = [t for t in meta.get("logits") or [] if isinstance(t, dict)]
     # Rows with source "target" carry an unsigned mean over the examples of both poles (their sign is
     # always 1): they belong to neither pole and are listed apart.
-    tokens = [
-        {"token": _text(t.get("token")), "weight": _num(t.get("w"))}
-        for t in logits
-        if t.get("source") != "target" and t.get("sign") in (None, want)
-    ]
+    tokens = []
+    for t in logits:
+        if t.get("source") == "target" or t.get("sign") not in (None, want):
+            continue
+        w = _num(t.get("w"))
+        tokens.append({"token": _text(t.get("token")), "weight": None if w is None else w * want, "static_weight": w})
     example_tokens = [
         {"token": _text(t.get("token")), "mean_abs_effect": _num(t.get("w")), "examples_active": _int(t.get("n_active"))}
         for t in logits

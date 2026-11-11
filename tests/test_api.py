@@ -267,3 +267,43 @@ def test_api_keys_in_urls_are_masked_in_the_access_log():
 def test_every_response_carries_the_security_headers(client):
     for r in (client.get("/"), client.get("/api/v1/info"), client.get("/api/v1/info", headers={"Host": "evil.example"})):
         assert r.headers["referrer-policy"] == "no-referrer" and r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_the_gate_reads_the_root_path_as_the_router_does(settings):
+    import asyncio
+
+    from neuron_atlas.gate import Gate
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"routed"})
+
+    gate = Gate(app, settings.with_overrides(api_keys=("k",)))
+
+    def status(root, path):
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "method": "GET", "path": path, "root_path": root, "query_string": b"",
+                 "headers": [(b"host", b"localhost")], "client": ("127.0.0.1", 1)}  # fmt: skip
+        asyncio.run(gate(scope, receive, send))
+        return sent[0]["status"]
+
+    # uvicorn builds path = root_path + request target, and h11 accepts a target without "/":
+    assert status("/", "/api/v1/info") == 401  # target "api/v1/info"
+    assert status("/a", "/api/v1/info") == 401  # target "pi/v1/info" under --root-path /a
+    assert status("/atlas", "/atlas/api/v1/info") == 401 and status("/atlas", "/atlas/") == 200
+
+
+def test_the_markdown_export_keeps_the_query_inside_its_code_span(client):
+    md = client.get("/api/v1/export", params={"q": "fish ` <img src=x onerror=alert(1)> `", "format": "md"}).text
+    first = md.split("\n\n")[1]
+    assert first.startswith("Query: ``") and "<img" in first  # inside a code span whose fence is longer
+    markdown_it = pytest.importorskip("markdown_it")
+    html = markdown_it.MarkdownIt("commonmark").render(md)
+    assert "<img" not in html

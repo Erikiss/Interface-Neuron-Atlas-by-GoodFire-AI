@@ -13,6 +13,7 @@ from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -73,7 +74,7 @@ def _atlas() -> Atlas:
 
 
 def _fail(message: str, code: int = 1) -> typer.Exit:
-    err.print(f"[red]error:[/red] {message}")
+    err.print(f"[red]error:[/red] {escape(message)}")
     return typer.Exit(code)
 
 
@@ -83,7 +84,7 @@ def _write(text: str, output: Path | None) -> None:
     else:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
-        err.print(f"wrote {output} ({len(text.encode('utf-8')):,} bytes)")
+        err.print(f"wrote {escape(str(output))} ({len(text.encode('utf-8')):,} bytes)")
 
 
 def _csv(value: str | None) -> list[str] | None:
@@ -131,8 +132,8 @@ def info(as_json: Annotated[bool, typer.Option("--json", help="Print JSON.")] = 
         return
     a = data["atlas"]
     table = Table(show_header=False, box=None, pad_edge=False)
-    table.add_row("release", data["release"]["url"])
-    table.add_row("model", a["model"])
+    table.add_row("release", escape(str(data["release"]["url"])))
+    table.add_row("model", escape(str(a["model"])))
     table.add_row("neurons", f"{a['neurons']:,} ({a['neurons_in_atlas_index']:,} in the atlas index, {a['neurons_with_circuit']:,} with circuit data)")
     table.add_row("poles", f"{a['poles']:,} ({a['poles_in_public_sample']:,} listed on goodfire.com)")
     table.add_row("modes", f"{a['modes']:,}")
@@ -181,22 +182,23 @@ def search(
         for col in ("pole", "mode", "share", "label"):
             table.add_column(col)
         for m in res.modes:
-            table.add_row(m.display, str(m.mode_index), _pct(m.share), m.label)
+            table.add_row(m.display, str(m.mode_index), _pct(m.share), escape(m.label))
     else:
         for col in ("pole", "cat", "modes", "what it fires on"):
             table.add_column(col, overflow="fold")
         hits = res.hits or [p for n in res.neurons for p in n.poles]
         for h in hits:
             best = h.matches[0] if h.matches else None
-            text = h.headline or h.description
+            # Atlas text is not Rich markup: "[/lastfm]" in a label must print as it is, not crash the table.
+            text = escape(h.headline or h.description)
             if best and best.field in ("mode", "mode_description", "subcircuit", "example", "island", "overview"):
                 where = f"mode {best.mode_index}" if best.mode_index is not None else best.field
                 share = f" · {_pct(best.share)}" if best.share is not None else ""
-                text = f"[dim]{where}{share}:[/dim] {best.text}\n[dim]{text[:160]}[/dim]"
+                text = f"[dim]{escape(where)}{share}:[/dim] {escape(best.text)}\n[dim]{escape((h.headline or h.description)[:160])}[/dim]"
             table.add_row(h.display, h.category, "" if h.n_modes is None else str(h.n_modes), text)
     out.print(table)
     for note in res.notes:
-        err.print(f"[yellow]note:[/yellow] {note}")
+        err.print(f"[yellow]note:[/yellow] {escape(note)}")
     if res.next_offset is not None:
         err.print(f"[dim]more: --offset {res.next_offset}[/dim]")
 
@@ -270,14 +272,16 @@ def similar(
     if as_json:
         out.print_json(res.model_dump_json(exclude_none=True))
         return
-    table = Table(title=f"similar to {res.anchor} ({res.method})", title_justify="left")
+    table = Table(title=f"similar to {escape(res.anchor)} ({escape(res.method)})", title_justify="left")
     for col in ("score", "pole", "mode", "text"):
         table.add_column(col, overflow="fold")
     for i in res.items:
-        table.add_row(f"{i.score:.3f}", i.display, "" if i.mode_index is None else str(i.mode_index), i.label or i.description[:200])
+        table.add_row(
+            f"{i.score:.3f}", i.display, "" if i.mode_index is None else str(i.mode_index), escape(i.label or i.description[:200])
+        )
     out.print(table)
     for note in res.notes:
-        err.print(f"[yellow]note:[/yellow] {note}")
+        err.print(f"[yellow]note:[/yellow] {escape(note)}")
 
 
 @app.command()
@@ -324,7 +328,7 @@ def export(
     finally:
         if output is not None:
             handle.close()
-    err.print(f"exported {count:,} poles" + (f" to {output}" if output else ""))
+    err.print(f"exported {count:,} poles" + (f" to {escape(str(output))}" if output else ""))
 
 
 # --------------------------------------------------------------------------- mirror / index
@@ -368,7 +372,7 @@ def mirror(
         except (ValueError, NotFound, AtlasError) as exc:
             raise _fail(str(exc)) from None
         est = plan.estimate()
-        extra = f" (+{est['circuit_only_neurons']:,} neurons known only by their circuit)" if est["circuit_only_neurons"] else ""
+        extra = f" (+ {est['circuit_only_neurons']:,} neurons known only by their circuit)" if est["circuit_only_neurons"] else ""
         out.print(
             f"[bold]{est['poles']:,}[/bold] poles of [bold]{est['neurons']:,}[/bold] neurons{extra} · "
             f"{est['files_total']:,} files, {est['files_present']:,} already mirrored, "
@@ -410,10 +414,10 @@ def mirror(
                 + (f", [red]{report.failed:,} failed[/red]" if report.failed else "")
             )
             for line in report.errors[:5]:
-                err.print(f"[red]{line}[/red]")
+                err.print(f"[red]{escape(line)}[/red]")
             if report.stopped:
                 err.print(
-                    f"[red]stopped early: {report.stopped}[/red]\n"
+                    f"[red]stopped early: {escape(report.stopped)}[/red]\n"
                     f"{report.not_attempted:,} files were not tried; run the same command again later to continue"
                 )
             if report.nothing_worked:
@@ -421,6 +425,8 @@ def mirror(
         if request.index:
             added = _index(atlas, plan.poles, index_examples)
             out.print(f"indexed {added:,} texts for search")
+        if not dry_run and est["files_to_fetch"] and report.stopped:
+            raise typer.Exit(1)  # after indexing what did arrive
 
 
 def _run_plan(atlas: Atlas, plan: Any, on_progress: Any) -> Any:
@@ -536,9 +542,9 @@ def geometry_map(
         pids = [h.pid for h in atlas.iter_search(SearchQuery(q=query or ""))]
         data = semantic_map(atlas, pids, unit=unit, method=method, clusters=clusters)
     write_map_html(data, output, title=f"Neuron Atlas map · {query or 'all poles'}")
-    out.print(f"wrote {output} ({len(data.get('points', [])):,} points)")
+    out.print(f"wrote {escape(str(output))} ({len(data.get('points', [])):,} points)")
     for note in data.get("notes", []):
-        err.print(f"[yellow]note:[/yellow] {note}")
+        err.print(f"[yellow]note:[/yellow] {escape(note)}")
 
 
 @geometry_app.command("graph")
@@ -554,7 +560,7 @@ def geometry_graph(
         if query is not None:
             dids = list(dict.fromkeys(h.did for h in atlas.iter_search(SearchQuery(q=query))))
         stats = write_graph(atlas, output, dids=dids)
-    out.print(f"wrote {output}: {stats['nodes']:,} neurons, {stats['edges']:,} edges")
+    out.print(f"wrote {escape(str(output))}: {stats['nodes']:,} neurons, {stats['edges']:,} edges")
 
 
 if __name__ == "__main__":  # pragma: no cover

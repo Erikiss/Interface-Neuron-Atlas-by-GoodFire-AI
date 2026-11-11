@@ -127,3 +127,54 @@ def test_a_job_that_cannot_fetch_anything_fails_and_indexes_nothing(settings):
             time.sleep(0.01)
         assert job.state == "failed" and "403" in job.error and ran == []
         jobs.shutdown()
+
+
+def test_max_poles_caps_poles_and_circuit_only_neurons_together(atlas):
+    capped = atlas.plan_mirror(MirrorRequest(selection=Selection(all=True, max_poles=3)))
+    assert capped.size == 3 and len(capped.poles) == 3 and capped.circuit_neurons == []
+    roomy = atlas.plan_mirror(MirrorRequest(selection=Selection(all=True, max_poles=10)))
+    assert len(roomy.poles) == 9 and roomy.circuit_neurons == ["L2_E5_N6"] and roomy.size == 10
+    est = roomy.estimate()
+    assert est["neurons"] == 5 and est["circuit_only_neurons"] == 1  # neurons of the poles, then the extra ones
+
+
+def test_a_job_that_stopped_early_keeps_and_indexes_what_it_fetched(settings, upstream):
+    import httpx
+
+    from neuron_atlas.mirror import MirrorPlan
+    from neuron_atlas.upstream import BREAKER_FAILURES, AtlasSource
+
+    served = []
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("good.json"):
+            served.append(url)
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(403, text="blocked")  # a WAF: the breaker stops the run
+
+    paths = [f"x/{i:02d}-good.json" for i in range(5)] + [f"y/{i:02d}.json" for i in range(BREAKER_FAILURES + 10)]
+    with AtlasSource(settings.with_overrides(max_concurrency=1), client=httpx.Client(transport=httpx.MockTransport(handler))) as src:
+        ran = []
+        jobs = MirrorJobs(src, after=ran.append)
+        job = jobs.submit(MirrorPlan(poles=[], sources=("subcircuit",), missing=paths), label="partly")
+        deadline = time.time() + 10
+        while job.state in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.01)
+        assert job.state == "done" and job.report.fetched == 5 and job.report.not_attempted > 0
+        assert job.error.startswith("stopped early") and ran == [job]
+        jobs.shutdown()
+
+
+def test_the_server_says_it_can_mirror_when_only_read_through_is_off(settings, upstream):
+    from starlette.testclient import TestClient
+
+    from neuron_atlas.api import create_app
+    from neuron_atlas.service import Atlas
+    from neuron_atlas.upstream import AtlasSource
+
+    strict = Atlas(source=AtlasSource(settings.with_overrides(allow_remote_fetch=False), client=upstream.client()))
+    with TestClient(create_app(strict, mcp=False)) as c:
+        info = c.get("/api/v1/info").json()["settings"]
+    strict.close()
+    assert info["can_fetch"] is False and info["can_mirror"] is True

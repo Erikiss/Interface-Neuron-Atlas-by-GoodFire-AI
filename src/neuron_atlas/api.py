@@ -54,7 +54,7 @@ from .models import (
 )
 from .search import int_list
 from .service import Atlas, NotFound
-from .upstream import NotMirrored, UpstreamError
+from .upstream import DamagedFile, NotMirrored, UpstreamBusy, UpstreamError
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -191,6 +191,14 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
     @app.exception_handler(UpstreamError)
     async def _upstream(_request: Request, exc: UpstreamError) -> JSONResponse:
         return JSONResponse({"error": "upstream", "detail": str(exc)}, status_code=502)
+
+    @app.exception_handler(UpstreamBusy)
+    async def _upstream_busy(_request: Request, exc: UpstreamBusy) -> JSONResponse:
+        return JSONResponse({"error": "upstream_busy", "detail": str(exc)}, status_code=503, headers={"Retry-After": "60"})
+
+    @app.exception_handler(DamagedFile)
+    async def _damaged(_request: Request, exc: DamagedFile) -> JSONResponse:
+        return JSONResponse({"error": "damaged", "detail": str(exc)}, status_code=503)
 
     @app.exception_handler(ValueError)
     async def _bad_request(_request: Request, exc: ValueError) -> JSONResponse:
@@ -506,7 +514,10 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
             if fmt == "csv":
                 yield render.csv_header()
             elif fmt == "md":
-                yield f"# Neuron Atlas export\n\nQuery: `{json.dumps(query.model_dump(exclude_defaults=True), ensure_ascii=False)}`\n\n"
+                from .render import _md_code  # a fence longer than any backtick run in the query
+
+                shown = json.dumps(query.model_dump(exclude_defaults=True), ensure_ascii=False)
+                yield f"# Neuron Atlas export\n\nQuery: {_md_code(shown)}\n\n"
             for hit in atlas.iter_search(query):
                 detail = details_of(hit)
                 if fmt == "ndjson":

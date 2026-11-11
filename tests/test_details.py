@@ -163,12 +163,15 @@ def test_circuit_view_per_pole(atlas, upstream):
     # r2 belongs to the other pole: the explorer's label says "-", the measurement says raised.
     r2 = next(r for r in pos["readers"] if r["id"] == "r2")
     assert r2["effect"] == "-" and r2["measured_direction"] == "raised"
-    assert pos["output_tokens"] == [{"token": " river", "weight": 0.2}]
+    assert pos["output_tokens"] == [{"token": " river", "weight": 0.2, "static_weight": 0.2}]
     assert pos["strongest_contexts"][0]["text"] == "crossed the wide «Danube» near"
 
     neg = circuit_view(meta, "neg")
     assert [g["id"] for g in neg["inputs"]] == ["g3", "g_single_no"]  # the catch-all is placed by its name
     assert neg["line"].startswith("Uninterpretable: mixed") and neg["output_tokens"][0]["token"] == " oven"
+    # The negative pole raises the logits of its tokens (negative activation x negative static weight).
+    oven = neg["output_tokens"][0]
+    assert oven["static_weight"] < 0 < oven["weight"] and oven["weight"] == -oven["static_weight"]
     assert circuit_view({}, "pos")["inputs"] == []
 
 
@@ -219,3 +222,29 @@ def test_text_helpers():
     lo, hi = island_window(long, 50)
     assert (lo, hi) == (26, 76)  # 24 before, the peak, 25 after
     assert island_window(long, None) == (0, 100) and island_window(long[:5], 2) == (0, 5)
+
+
+def test_a_reader_of_the_other_pole_keeps_its_direction_when_the_mean_rounds_to_zero(upstream):
+    import json
+
+    from neuron_atlas.render import _reader_effect
+    from neuron_atlas.views import circuit_view
+
+    meta = json.loads(upstream.files["moe_circuit_explorer_data/L4_E1_N10/meta.json"])
+    rows = meta["pole_view"]["+"]["readers"]
+    r2 = next(r for r in rows if r["id"] == "r2")  # home: the negative pole, label "-"
+    r2["mean_w"] = 0.0  # a small positive mean, stored rounded: still "raised" on this pole
+    item = next(r for r in circuit_view(meta, "pos")["readers"] if r["id"] == "r2")
+    assert item["label_of_other_pole"] and item["measured_direction"] == "raised"
+    r2["mean_w"] = -0.0  # agrees with the label: no contradiction to report, but the label is the other pole's
+    item = next(r for r in circuit_view(meta, "pos")["readers"] if r["id"] == "r2")
+    assert item["label_of_other_pole"] and "measured_direction" not in item
+    assert _reader_effect(item) == "lowered by this pole (measured; the explorer's label comes from the other pole)"
+
+
+def test_the_overview_digest_is_checked_against_the_circuit_file(atlas, upstream):
+    unchecked = atlas.pole(fakeatlas.RIVER, ["overview"]).overview["circuit_digest"]
+    assert unchecked["checked"] is False  # the circuit file is not mirrored yet: nothing is downloaded for this
+    atlas.pole(fakeatlas.RIVER, ["circuit"])  # now it is
+    digest = atlas.pole(fakeatlas.RIVER, ["overview"]).overview["circuit_digest"]
+    assert digest["checked"] is True and digest["output_tokens"] == [{"token": " river", "weight": 0.2, "static_weight": 0.2}]

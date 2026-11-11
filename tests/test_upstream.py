@@ -6,9 +6,11 @@ import pytest
 from neuron_atlas.config import KNOWN_RELEASE_URL, Settings, release_id
 from neuron_atlas.upstream import (
     ABSENT,
+    DAMAGED,
     PRESENT,
     UNKNOWN,
     AtlasSource,
+    DamagedFile,
     NotMirrored,
     RateLimiter,
     Store,
@@ -203,8 +205,11 @@ def test_a_damaged_stored_file_is_fetched_again(settings, upstream, damage):
         assert upstream.fetched(path) == 2 and src.status(path) == PRESENT
     with AtlasSource(settings.with_overrides(offline=True), client=upstream.client()) as src:
         gz.write_bytes(b"\x1f\x8b broken")
-        with pytest.raises(NotMirrored):  # offline: a clear "not mirrored", never an EOFError
+        with pytest.raises(DamagedFile):  # offline: a clear "damaged", never an EOFError
             src.get_bytes(path)
+        assert gz.exists() and src.status(path) == DAMAGED  # kept until a good copy replaces it
+    with AtlasSource(settings, client=upstream.client()) as src:
+        assert src.get_bytes(path) == good and src.status(path) == PRESENT  # online again: replaced
 
 
 def test_the_manifest_is_checked_against_the_files_and_rebuilt_when_damaged(tmp_path):
@@ -222,9 +227,15 @@ def test_the_manifest_is_checked_against_the_files_and_rebuilt_when_damaged(tmp_
         (tmp_path / name).unlink(missing_ok=True)
     (tmp_path / "files" / "a" / "portal.json.gz").write_bytes(gzip.compress(b"<html>log in</html>"))
     store = Store(tmp_path)
-    assert store.statuses(["a/b.json", "a/portal.json"]) == {"a/b.json": PRESENT, "a/portal.json": UNKNOWN}
-    assert store.info("a/b.json").raw_bytes == 8 and not (tmp_path / "files" / "a" / "portal.json.gz").exists()
+    # Adoption is cheap (size only); the content is checked when the file is first read.
+    assert store.statuses(["a/b.json", "a/portal.json"]) == {"a/b.json": PRESENT, "a/portal.json": PRESENT}
     store.close()
+    settings = Settings(data_dir=tmp_path.parent, release_url=f"https://static.goodfire.ai/x/{tmp_path.name}/", offline=True)
+    with AtlasSource(settings) as src:
+        assert src.get_bytes("a/b.json") == b'{"x": 1}' and src.store.info("a/b.json").raw_bytes == 8
+        with pytest.raises(DamagedFile):
+            src.get_bytes("a/portal.json")
+        assert src.status("a/portal.json") == DAMAGED and src.store.summary()["damaged"] == 1
 
     # A damaged manifest: set aside, rebuilt.
     (tmp_path / "manifest.sqlite").write_bytes(b"this is not a database" * 100)
@@ -389,3 +400,94 @@ def test_the_explicit_mirror_fetches_even_when_read_through_is_off(settings, ups
             src.get_json(path)
         assert src.fetch_many([path])[0].status == PRESENT
         assert src.get_json(path)["pid"] == fakeatlas.RIVER
+
+
+def test_a_passing_read_error_leaves_the_mirrored_file_alone(settings, upstream, monkeypatch):
+    import errno
+    import gzip as gzip_module
+
+    path = pole_path("subcircuit", fakeatlas.RIVER)
+    with AtlasSource(settings, client=upstream.client()) as src:
+        good = src.get_bytes(path)
+    real_open = gzip_module.open
+
+    def no_descriptors(*_a, **_k):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    with AtlasSource(settings.with_overrides(offline=True), client=upstream.client()) as src:
+        monkeypatch.setattr(gzip_module, "open", no_descriptors)
+        with pytest.raises(OSError, match="Too many open files"):
+            src.get_bytes(path)
+        monkeypatch.setattr(gzip_module, "open", real_open)
+        assert src.status(path) == PRESENT and src.get_bytes(path) == good  # nothing was deleted
+
+
+def test_offline_a_damaged_index_fails_the_catalog_load_loudly(settings, upstream):
+    from neuron_atlas.catalog import Catalog
+
+    with AtlasSource(settings, client=upstream.client()) as src:
+        Catalog.load(src)  # mirrors the index files
+        gz = src.store.files_dir / "subcircuit_modes_index.json.gz"
+    gz.write_bytes(gz.read_bytes()[:40])
+    with AtlasSource(settings.with_overrides(offline=True), client=upstream.client()) as src:
+        with pytest.raises(DamagedFile):
+            Catalog.load(src)
+        assert gz.exists()
+
+
+def test_a_full_disk_is_not_mistaken_for_a_damaged_manifest(tmp_path, monkeypatch):
+    import sqlite3
+
+    Store(tmp_path).close()
+
+    def full(_db):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(Store, "_prepare", staticmethod(full))
+    with pytest.raises(sqlite3.OperationalError):
+        Store(tmp_path)
+    assert not list(tmp_path.glob("manifest.sqlite*.damaged-*"))
+
+
+def test_a_long_retry_after_pauses_every_later_request(settings, monkeypatch):
+    import httpx
+
+    from neuron_atlas.upstream import UpstreamBusy
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(429, headers={"retry-after": "3600"})
+
+    paths = [pole_path("subcircuit", f"L4_E1_N{i}__pos") for i in range(50)]
+    with _source(settings, handler) as src:
+        results = src.fetch_many(paths)
+        assert len(calls) <= settings.max_concurrency  # the run stops at once, not after 12 failures
+        assert any(r.error.startswith("not attempted: ") for r in results)
+        with pytest.raises(UpstreamBusy, match="try again in"):
+            src.get_bytes("public_atlas_data/index.json")  # a read waits for nobody: it says so
+    assert len(calls) <= settings.max_concurrency
+
+
+def test_concurrent_callers_adopt_an_orphan_file_once(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    store.write("a/b.json", b'{"x": 1}')
+    store._drop_row("a/b.json")  # an orphan, as after a lost manifest
+    records = []
+    real_record = Store._record
+
+    def slow_record(self, info):
+        records.append(info.relpath)
+        time.sleep(0.05)
+        return real_record(self, info)
+
+    monkeypatch.setattr(Store, "_record", slow_record)
+    threads = [threading.Thread(target=store.statuses, args=(["a/b.json"],)) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert records == ["a/b.json"] and store.status("a/b.json") == PRESENT
+    store.close()

@@ -885,14 +885,22 @@ def _digest_blocks(digest: dict[str, Any]) -> list[_Block]:
         blocks.append(_para("No circuit: " + _flat(digest.get("note")) + "."))
     if inputs:
         rows: list[list[_Cell]] = [
-            [_flat(i.get("name")), _flat(i.get("effect")), _flat(i.get("role")), _pct(i.get("share"))] for i in inputs
+            [_flat(i.get("name")), _flat(i.get("role")), _flat(i.get("effect")), _pct(i.get("share"))] for i in inputs
         ]
-        blocks.append(_Table(["Input group", "Effect", "Role", "Share"], rows, "lllr"))
+        blocks.append(_Table(["Input group", "Role", "Net sign (gate + up)", "Share"], rows, "lllr"))
     if readers:
-        rows = [[_flat(r.get("name")), _flat(r.get("effect")), _count(r.get("n"))] for r in readers]
+        rows = [[_flat(r.get("name")), _reader_effect(r), _count(r.get("n"))] for r in readers]
         blocks.append(_Table(["Reader group", "Effect", "Neurons"], rows, "llr"))
     if tokens:
         blocks.append(_Para(_spans(_b("Output tokens most affected:"), " ") + _output_tokens(tokens)))
+    if digest.get("checked") is False and (tokens or readers):
+        blocks.append(
+            _note(
+                "As stored with the Overview data, not checked against the circuit file (not mirrored here): the "
+                "token list can include unsigned example tokens, and reader labels can be those of the other pole. "
+                "The Circuit section has the checked lists."
+            )
+        )
     return blocks
 
 
@@ -1065,10 +1073,10 @@ def _one_subcircuit(s: Subcircuit, pole: str, labels: dict[int, str], names: dic
     blocks += _prose(s.up_role, "Up role.")
     if s.profile is not None:
         profile = [
-            ("at or above θ", s.profile.ge_theta),
-            ("between 0.5 θ and θ", s.profile.mid),
-            ("below 0.5 θ", s.profile.weak),
-            ("gate closed", s.profile.closed),
+            ("gate open, at or above θ", s.profile.ge_theta),
+            ("gate open, 0.5–1 θ", s.profile.mid),
+            ("gate open, below 0.5 θ", s.profile.weak),
+            ("gate closed (any strength)", s.profile.closed),
         ]
         parts = [f"{name} {_pct(value)}" for name, value in profile if value is not None]
         if parts:
@@ -1119,6 +1127,10 @@ def _reader_effect(group: dict[str, Any]) -> str:
     measured = _flat(group.get("measured_direction"))
     if measured:
         return f"shown as “{shown}” in the explorer (the label of the other pole) · measured on this pole: {measured}"
+    if group.get("label_of_other_pole"):
+        if group.get("mean_effect") is None:
+            return f"shown as “{shown}” in the explorer (the label of the other pole); not measured on this pole"
+        return f"{shown} by this pole (measured; the explorer's label comes from the other pole)"
     return f"{shown} by this pole" if effect in ("+", "-") else shown
 
 
@@ -1221,7 +1233,12 @@ def _circuit_parts(
     overview += _group_tables(inputs, readers, level)
     if tokens:
         overview.append(_Heading(level + 1, "Output tokens", anchor="circuit-output"))
-        overview.append(_note("The vocabulary tokens whose logits the neuron pushes most on this pole (weight in brackets)."))
+        overview.append(
+            _note(
+                "The vocabulary tokens whose logits the neuron pushes most when this pole fires "
+                "(push on the logit in brackets; > 0 = raised)."
+            )
+        )
         overview.append(_Para(_output_tokens(tokens)))
 
     details: list[_Block] = []
@@ -1361,7 +1378,7 @@ def _pole_blocks(detail: PoleDetail) -> list[_Block]:
 #: Characters that would start markup inside running text: "_" only where it could open or close emphasis
 #: (not inside snake_case or L30_E47_N449__pos), "<" only where it could open a tag (not in "<0.1%").
 _MD_INLINE = re.compile(
-    r"\\(?=[!-/:-@\[-`{-~]|$)|[`*~]|<(?=[A-Za-z/!?])|(?<!\w)_+|_+(?!\w)|&(?=#?\w+;)|\](?=[(\[:])", re.M
+    r"\\(?=[!-/:-@\[-`{-~]|$)|[`*~]|<(?=[A-Za-z/!?])|(?<!\w)_+|(?<!_)_+(?!\w)|&(?=#?\w+;)|\](?=[(\[:])", re.M
 )
 #: What would turn a line into a heading, quote, list item or rule.
 _MD_START = re.compile(r"^[ \t]*(#{1,6}(?=[ \t]|$)|>|[-+](?=[ \t]|$)|\d{1,9}(?=[.)](?:[ \t]|$))|(?:=+|-{2,})[ \t]*$)", re.M)
@@ -1398,9 +1415,20 @@ def _atx_text(match: re.Match[str]) -> str:
     return text.strip(" \t")
 
 
+def _md_escape(match: re.Match[str]) -> str:
+    token = match.group(0)
+    # "<" and "&" as entities: a backslash before "<" is undone where a GFM autolink ("https://x/\\<…")
+    # takes the backslash into the address, and some renderers do not honour it at all.
+    if token == "<":
+        return "&lt;"
+    if token == "&":
+        return "&amp;"
+    return "".join("\\" + char for char in token)
+
+
 def _md(text: str) -> str:
     """Prose escaped for Markdown so that nothing in it is read as markup; «» and typographic quotes stay."""
-    return _MD_INLINE.sub(lambda m: "".join("\\" + char for char in m.group(0)), text)
+    return _MD_INLINE.sub(_md_escape, text)
 
 
 def _md_line_start(match: re.Match[str]) -> str:
@@ -1529,7 +1557,7 @@ def _demoted_report(markdown: str, top: int) -> str:
             out.append(text)
             previous = ""
             continue
-        escaped = _REPORT_UNSAFE.sub(r"\1\\\2", text)
+        escaped = _REPORT_UNSAFE.sub(lambda m: m.group(1) + ("&lt;" if m.group(2) == "<" else "\\" + m.group(2)), text)
         if kind == "heading":
             level += shift
             escaped = f"{'#' * level} {escaped}" if level <= 6 else (f"**{escaped}**" if escaped else "")
