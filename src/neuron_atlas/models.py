@@ -470,4 +470,5 @@ class BatchPolesRequest(_Model):
 class BatchPolesResponse(_Model):
     poles: list[PoleDetail] = Field(default_factory=list)
     not_found: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
     took_ms: float = 0.0

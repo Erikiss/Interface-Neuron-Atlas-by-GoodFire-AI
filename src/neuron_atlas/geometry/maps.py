@@ -11,6 +11,10 @@ Projections:
 ``pca``   fast and deterministic; shows the broad axes, clusters overlap.
 ``umap``  separates clusters well; needs the optional ``umap-learn`` package.
 ``tsne``  scikit-learn's t-SNE; slow, limited to 15,000 points.
+
+UMAP and t-SNE take seconds to minutes and much memory, so a server runs only
+one of them at a time and may cap their size (``max_slow_points``); a request
+that would exceed either falls back to PCA and says so in its notes.
 """
 
 from __future__ import annotations
@@ -32,18 +36,76 @@ _TSNE_LIMIT = 15_000
 
 _cache: dict[str, dict[str, Any]] = {}
 _cache_lock = threading.Lock()
+#: Held while a slow projection (UMAP, t-SNE) runs; a second one at the same time falls back to PCA.
+_slow_lock = threading.Lock()
+_BUSY = "is being computed"
 
 
-def project(vectors: np.ndarray, method: str = "pca", seed: int = 0) -> tuple[np.ndarray, list[str]]:
-    """Project row vectors to 2-D.  Returns the coordinates (scaled to about [-1, 1]) and notes."""
+def _line(n: int) -> np.ndarray:
+    xy = np.zeros((n, 2), dtype=np.float32)
+    xy[:, 0] = np.linspace(-1, 1, n) if n > 1 else 0.0
+    return xy
+
+
+def project(
+    vectors: np.ndarray, method: str = "pca", seed: int = 0, *, max_slow_points: int | None = None
+) -> tuple[np.ndarray, list[str]]:
+    """Project row vectors to 2-D.  Returns the coordinates (scaled to about [-1, 1]) and notes.
+
+    ``max_slow_points`` caps the size of a UMAP or t-SNE projection (larger
+    ones use PCA); only one slow projection runs at a time in this process.
+    """
     notes: list[str] = []
+    if method not in METHODS:
+        raise ValueError(f"unknown projection {method!r}; choose from {', '.join(METHODS)}")
     n = vectors.shape[0]
     if n == 0:
         return np.zeros((0, 2), dtype=np.float32), notes
     if n < 3 or vectors.shape[1] < 2:
-        xy = np.zeros((n, 2), dtype=np.float32)
-        xy[:, 0] = np.linspace(-1, 1, n) if n > 1 else 0.0
-        return xy, notes
+        return _line(n), notes
+    vectors = np.asarray(vectors, dtype=np.float32)
+    if not np.isfinite(vectors).all():
+        raise ValueError("the vectors contain NaN or infinite values")
+    if float(np.ptp(vectors, axis=0).max()) < 1e-9:
+        notes.append("all points have the same vector; they are spread on a line only to stay visible")
+        return _line(n), notes
+    if method in ("umap", "tsne") and not np.linalg.norm(vectors, axis=1).all():
+        notes.append(
+            f"{method.upper()} compares directions, and some points have no direction (empty text); used PCA instead"
+        )
+        method = "pca"
+    if method in ("umap", "tsne") and max_slow_points is not None and n > max_slow_points:
+        notes.append(
+            f"{method.upper()} is limited to {max_slow_points:,} points on this server ({n:,} requested); used PCA instead"
+        )
+        method = "pca"
+    if method in ("umap", "tsne"):
+        if not _slow_lock.acquire(blocking=False):
+            notes.append(f"another {method.upper()} map {_BUSY}; used PCA instead (try again in a minute)")
+            method = "pca"
+        else:
+            try:
+                return _finish(_slow(vectors, method, seed, notes), vectors, seed), notes
+            finally:
+                _slow_lock.release()
+    return _finish(None, vectors, seed), notes
+
+
+def _finish(xy: np.ndarray | None, vectors: np.ndarray, seed: int) -> np.ndarray:
+    """PCA when no other projection was made; then centre and scale to about [-1, 1]."""
+    if xy is None:
+        from sklearn.decomposition import PCA
+
+        xy = PCA(n_components=2, random_state=seed).fit_transform(vectors)
+    xy = np.asarray(xy, dtype=np.float32)
+    xy -= xy.mean(axis=0, keepdims=True)
+    scale = float(np.percentile(np.abs(xy), 99.5))
+    return xy / (scale if np.isfinite(scale) and scale > 0 else 1.0)
+
+
+def _slow(vectors: np.ndarray, method: str, seed: int, notes: list[str]) -> np.ndarray | None:
+    """UMAP or t-SNE coordinates, or ``None`` (with a note) when they cannot be made."""
+    n = vectors.shape[0]
     xy: np.ndarray | None = None
     if method == "umap":
         try:
@@ -54,11 +116,17 @@ def project(vectors: np.ndarray, method: str = "pca", seed: int = 0) -> tuple[np
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 reducer = umap.UMAP(
-                    n_components=2, metric="cosine", n_neighbors=min(15, n - 1), min_dist=0.1, random_state=seed
+                    n_components=2,
+                    metric="cosine",
+                    n_neighbors=min(15, n - 1),
+                    min_dist=0.1,
+                    random_state=seed,
                 )
                 xy = reducer.fit_transform(vectors)
         except ImportError:
-            notes.append('UMAP needs the optional package: pip install "neuron-atlas-interface[umap]"; used PCA instead')
+            notes.append(
+                'UMAP needs the optional package: pip install "neuron-atlas-interface[umap]"; used PCA instead'
+            )
     elif method == "tsne":
         if n > _TSNE_LIMIT:
             notes.append(f"t-SNE is limited to {_TSNE_LIMIT:,} points ({n:,} requested); used PCA instead")
@@ -66,18 +134,16 @@ def project(vectors: np.ndarray, method: str = "pca", seed: int = 0) -> tuple[np
             from sklearn.manifold import TSNE
 
             xy = TSNE(
-                n_components=2, metric="cosine", init="pca", perplexity=min(30.0, max(2.0, (n - 1) / 3)), random_state=seed
+                n_components=2,
+                metric="cosine",
+                init="pca",
+                perplexity=min(30.0, max(2.0, (n - 1) / 3)),
+                random_state=seed,
             ).fit_transform(vectors)
-    elif method != "pca":
-        raise ValueError(f"unknown projection {method!r}; choose from {', '.join(METHODS)}")
-    if xy is None:
-        from sklearn.decomposition import PCA
-
-        xy = PCA(n_components=2, random_state=seed).fit_transform(vectors)
-    xy = np.asarray(xy, dtype=np.float32)
-    xy -= xy.mean(axis=0, keepdims=True)
-    scale = float(np.percentile(np.abs(xy), 99.5)) or 1.0
-    return xy / scale, notes
+    if xy is not None and not np.isfinite(xy).all():
+        notes.append(f"{method.upper()} did not converge on these points; used PCA instead")
+        xy = None
+    return xy
 
 
 def _cluster(vectors: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
@@ -88,7 +154,9 @@ def _cluster(vectors: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
     return model.fit_predict(vectors)
 
 
-def _cluster_captions(atlas: Atlas, rows: list[int], labels: np.ndarray, k: int, words: int = 3) -> dict[int, str]:
+def _cluster_captions(
+    atlas: Atlas, rows: list[int], labels: np.ndarray, k: int, words: int = 3
+) -> dict[int, str]:
     """A few words that set each cluster apart (highest mean TF-IDF relative to the whole map)."""
     embedder = atlas.semantic.embedder
     tfidf = getattr(embedder, "tfidf", None)
@@ -122,12 +190,15 @@ def semantic_map(
     method: str = "pca",
     clusters: int = 0,
     seed: int = 0,
+    *,
+    max_slow_points: int | None = None,
 ) -> dict[str, Any]:
     """Coordinates for a set of poles (or all of their modes).
 
     Returns ``{"unit", "method", "points": [...], "clusters": [...], "notes": [...]}``.
     Each point has ``pid``, ``x``, ``y``, ``layer``, ``category``, ``pole``,
     ``label``, ``cluster`` and, for ``unit="mode"``, ``mode_index`` and ``share``.
+    ``max_slow_points`` caps UMAP and t-SNE (see :func:`project`).
     """
     if unit not in ("pole", "mode"):
         raise ValueError("unit must be 'pole' or 'mode'")
@@ -137,7 +208,7 @@ def semantic_map(
     catalog = atlas.catalog
     wanted = list(dict.fromkeys(pids)) if pids is not None else list(catalog.poles)
     key = hashlib.sha1(
-        f"{atlas.source.release_id}|{sem.embedder.name}|{unit}|{method}|{clusters}|{seed}|".encode()
+        f"{atlas.source.release_id}|{sem.embedder.name}|{unit}|{method}|{clusters}|{seed}|{max_slow_points}|".encode()
         + "\n".join(wanted).encode()
     ).hexdigest()
     with _cache_lock:
@@ -156,13 +227,17 @@ def semantic_map(
         rows = [i for i, d in enumerate(sem.docs) if d.pid in wanted_set]
         vectors = sem.vectors[rows] if rows else np.zeros((0, 2), np.float32)
         doc_rows = rows
-    missing = len(wanted_set) - len({sem.pole_ids[i] for i in rows} if unit == "pole" else {sem.docs[i].pid for i in rows})
+    missing = len(wanted_set) - len(
+        {sem.pole_ids[i] for i in rows} if unit == "pole" else {sem.docs[i].pid for i in rows}
+    )
     if missing:
         notes.append(f"{missing:,} poles have no description and are not on the map")
 
-    xy, more = project(vectors, method, seed)
+    xy, more = project(vectors, method, seed, max_slow_points=max_slow_points)
     notes.extend(more)
     labels = _cluster(vectors, clusters, seed) if clusters and len(rows) >= clusters else None
+    if clusters and labels is None:
+        notes.append(f"{len(rows):,} points are too few for {clusters} clusters; no clusters drawn")
     captions = _cluster_captions(atlas, doc_rows, labels, clusters) if labels is not None else {}
 
     points: list[dict[str, Any]] = []
@@ -214,6 +289,8 @@ def semantic_map(
         "clusters": cluster_list,
         "notes": notes,
     }
+    if any(_BUSY in n for n in notes):
+        return result  # a stand-in while another map was computed; ask again later for the real one
     with _cache_lock:
         if len(_cache) > 16:
             _cache.pop(next(iter(_cache)))

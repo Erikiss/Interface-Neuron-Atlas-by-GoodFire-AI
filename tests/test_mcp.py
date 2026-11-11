@@ -9,7 +9,11 @@ from . import fakeatlas
 
 pytest.importorskip("mcp")
 
-HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json", "Host": "localhost:8000"}
+HEADERS = {
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
+    "Host": "localhost:8000",
+}
 
 
 def rpc(client, method, params=None, headers=None, rid=1):
@@ -41,7 +45,11 @@ def test_tools_are_listed_with_descriptions(client):
     }  # fmt: skip
     assert all(len(t["description"]) > 40 for t in tools.values())
     assert "query" in tools["search_neurons"]["inputSchema"]["properties"]
-    init = rpc(client, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}).json()
+    init = rpc(
+        client,
+        "initialize",
+        {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+    ).json()
     assert "Neuron Atlas" in init["result"]["instructions"]
 
 
@@ -53,7 +61,14 @@ def test_search_and_read(client):
     assert modes["modes"][0]["pole"] == fakeatlas.MIXED
     page = call(client, "get_pole", id="+ L4/E1/N10", include="modes,examples", max_examples=1)
     assert isinstance(page, str) and "L4/E1/N10" in page and "Danube" in page
-    clipped = call(client, "get_pole", id=fakeatlas.RIVER, include="modes,examples,subcircuits,overview", max_examples=3, max_chars=400)
+    clipped = call(
+        client,
+        "get_pole",
+        id=fakeatlas.RIVER,
+        include="modes,examples,subcircuits,overview",
+        max_examples=3,
+        max_chars=400,
+    )
     assert len(clipped) < 600 and "cut at 400 characters" in clipped
     both = call(client, "get_poles", ids=["L4_E1_N10", "zzz"])
     assert "L4/E1/N10" in both and "Not found: zzz" in both
@@ -85,7 +100,9 @@ def test_batch_similar_info_glossary(client):
 
 
 def test_errors_reach_the_model_as_tool_errors(client):
-    result = rpc(client, "tools/call", {"name": "get_pole", "arguments": {"id": "L77_E1_N1__pos"}}).json()["result"]
+    result = rpc(client, "tools/call", {"name": "get_pole", "arguments": {"id": "L77_E1_N1__pos"}}).json()[
+        "result"
+    ]
     assert result["isError"] is True
 
 
@@ -111,3 +128,59 @@ def test_the_endpoint_answers_only_to_known_hosts_and_keys(atlas, settings):
     atlas.settings = settings.with_overrides(allowed_hosts=("*",))
     with TestClient(create_app(atlas)) as c:
         assert rpc(c, "tools/list", headers={**HEADERS, "Host": "anything.example"}).status_code == 200
+
+
+def tool_error(client, name, **arguments):
+    result = rpc(client, "tools/call", {"name": name, "arguments": arguments}).json()["result"]
+    assert result["isError"] is True, result
+    return result["content"][0]["text"]
+
+
+def test_post_to_mcp_is_served_in_place(client):
+    r = client.post(
+        "/mcp",
+        headers=HEADERS,
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 200 and r.json()["result"]["tools"]
+
+
+def test_mistakes_come_back_as_readable_tool_errors(client):
+    assert "no such neuron or pole" in tool_error(client, "get_pole", id="L77_E1_N1__pos")
+    bad_match = tool_error(client, "search_neurons", query="river", match="telepathy")
+    assert "invalid argument" in bad_match and "match" in bad_match
+    assert "layer" in tool_error(client, "search_neurons", query="layer:abc")
+    assert "at most" in tool_error(client, "batch_search", queries=["x"] * 60)
+
+
+def test_answers_stay_within_max_chars(client):
+    full = call(client, "search_neurons", query="layer:4..39", limit=10)
+    small = call(client, "search_neurons", query="layer:4..39", limit=10, max_chars=700)
+    assert len(json.dumps(small)) <= 900 and small["notes"]
+    shown = len(small["hits"])
+    if shown < len(full["hits"]):
+        assert small["next_offset"] == shown
+    assert (
+        call(client, "search_neurons", query="layer:4..39", limit=10, max_chars=0) == full
+    )  # 0 = default budget
+    batch = call(client, "batch_search", queries=["river", "chess", "names"], max_chars=600)
+    assert batch["notes"] and len(batch["results"]) == 3
+
+
+def test_long_pole_documents_lose_examples_before_they_are_cut(client):
+    whole = call(
+        client, "get_pole", id=fakeatlas.RIVER, include="modes,examples", max_examples=3, max_chars=100_000
+    )
+    budget = len(whole) - 10
+    fitted = call(
+        client, "get_pole", id=fakeatlas.RIVER, include="modes,examples", max_examples=3, max_chars=budget
+    )
+    assert len(fitted) <= budget and "shortened to fit" in fitted and "cut at" not in fitted
+    assert "Danube" in fitted  # the modes themselves are kept
+
+
+def test_get_poles_names_the_ids_it_did_not_read(client):
+    ids = [fakeatlas.RIVER] * 26 + ["L9_E2_N20__pos"]
+    text = call(client, "get_poles", ids=ids, max_chars=200_000)
+    assert "Not read" in text and "L9_E2_N20__pos" in text

@@ -42,6 +42,11 @@ from .search import SearchIndex
 from .semantic import SemanticIndex, make_embedder
 from .upstream import AtlasSource, neuron_path
 
+#: Most hits one batch search returns over all its queries.
+MAX_BATCH_HITS = 2000
+#: Most pole documents one batch request returns.
+MAX_BATCH_POLES = 50
+
 
 class NotFound(KeyError):
     """No such neuron or pole in this release."""
@@ -66,6 +71,7 @@ class Atlas:
         self._jobs: MirrorJobs | None = None
         #: Set when the configured embedder could not be used and LSA stepped in.
         self.embedder_note: str | None = None
+        self._fetch_slots = threading.BoundedSemaphore(max(2, self.settings.max_concurrency * 2))
         self.started_at = time.time()
 
     def close(self) -> None:
@@ -75,6 +81,11 @@ class Atlas:
         if self._search is not None:
             self._search.close()
         self.source.close()
+
+    def stop_jobs(self) -> None:
+        """Cancel running and queued downloads (the Atlas stays usable)."""
+        if self._jobs is not None:
+            self._jobs.cancel_all()
 
     def __enter__(self) -> Atlas:
         return self
@@ -97,9 +108,13 @@ class Atlas:
         if self._semantic is None:
             with self._lock:
                 if self._semantic is None:
-                    embedder, note = make_embedder(self.settings.embedder, model_dir=self.settings.data_dir / "models")
+                    embedder, note = make_embedder(
+                        self.settings.embedder, model_dir=self.settings.data_dir / "models"
+                    )
                     self.embedder_note = note
-                    self._semantic = SemanticIndex(self.catalog, cache_dir=self.source.store.root, embedder=embedder)
+                    self._semantic = SemanticIndex(
+                        self.catalog, cache_dir=self.source.store.root, embedder=embedder
+                    )
         return self._semantic
 
     @property
@@ -149,6 +164,8 @@ class Atlas:
         pole = pole or default_pole
         if pole is None:
             known = self.catalog.poles_of(nid.did)
+            if not known:
+                raise NotFound(ref)
             if len(known) == 1:
                 return known[0].pid
             raise ValueError(f"{ref!r} names a neuron; add the pole, e.g. {nid.did}__pos or {nid.did}__neg")
@@ -188,25 +205,40 @@ class Atlas:
             query = query.model_copy(update={"limit": self.settings.max_page_size})
         return query
 
-    def search(self, query: SearchQuery | dict[str, Any] | str) -> SearchResponse:
+    def search(
+        self, query: SearchQuery | dict[str, Any] | str, *, group_by: str | None = None
+    ) -> SearchResponse:
         if isinstance(query, str):
             query = SearchQuery(q=query)
         elif isinstance(query, dict):
             query = SearchQuery.model_validate(query)
-        return self.search_index.search(self._clamp(query))
+        return self.search_index.search(self._clamp(query), group_by=group_by)
 
     def batch_search(self, queries: Iterable[SearchQuery]) -> list[SearchResponse]:
+        """Several searches at once.  All queries together return at most :data:`MAX_BATCH_HITS` hits."""
         queries = list(queries)
         if len(queries) > self.settings.max_batch_size:
             raise ValueError(f"at most {self.settings.max_batch_size} queries per batch")
-        return [self.search(q) for q in queries]
+        share = max(1, MAX_BATCH_HITS // max(1, len(queries)))
+        out = []
+        for q in queries:
+            limited = q.limit > share
+            res = self.search(q.model_copy(update={"limit": min(q.limit, share)}) if limited else q)
+            if limited:
+                res.notes.append(
+                    f"limit lowered to {share} (a batch returns at most {MAX_BATCH_HITS:,} hits in all)"
+                )
+            out.append(res)
+        return out
 
     def iter_search(self, query: SearchQuery, page: int = 500) -> Iterator[Any]:
         """Every hit of a search, paging internally (for exports and selections)."""
         offset = 0
         page = min(page, self.settings.max_page_size)
         while True:
-            res = self.search_index.search(query.model_copy(update={"limit": page, "offset": offset, "facets": False}))
+            res = self.search_index.search(
+                query.model_copy(update={"limit": page, "offset": offset, "facets": False}), group_by="pole"
+            )
             items = res.hits or res.neurons or res.modes
             yield from items
             if res.next_offset is None:
@@ -224,9 +256,32 @@ class Atlas:
         remote: bool | None = None,
     ) -> PoleDetail:
         pid = self.resolve_pid(ref)
-        detail = self.details.pole(pid, include, max_examples=max_examples, remote=remote)
+        include = list(include)
+        if remote is not False and self.source.can_fetch(remote) and self._needs_fetch(pid):
+            # Waiting for the polite upstream rate ties up a worker thread; never let more than a few
+            # requests do that at once, so searches and other requests stay responsive.
+            if not self._fetch_slots.acquire(blocking=False):
+                detail = self.details.pole(pid, include, max_examples=max_examples, remote=False)
+                detail.notes.append(
+                    "The server is busy fetching other poles; this answer shows what is downloaded already. "
+                    "Ask again in a moment for the rest."
+                )
+                return detail
+            try:
+                detail = self.details.pole(pid, include, max_examples=max_examples, remote=remote)
+            finally:
+                self._fetch_slots.release()
+        else:
+            detail = self.details.pole(pid, include, max_examples=max_examples, remote=remote)
         self._index_quietly(pid)
         return detail
+
+    def _needs_fetch(self, pid: str) -> bool:
+        from .mirror import files_of_pole
+        from .upstream import UNKNOWN
+
+        paths = list(files_of_pole(self.catalog.poles[pid]).values())
+        return any(status == UNKNOWN for status in self.source.store.statuses(paths).values())
 
     def neuron(self, ref: str, include: Iterable[str] = (), *, remote: bool | None = None) -> NeuronDetail:
         return self.details.neuron(self.resolve_did(ref), include, remote=remote)
@@ -240,9 +295,13 @@ class Atlas:
             raise ValueError(f"at most {self.settings.max_batch_size} ids per batch")
         pids, missing = self.expand(refs)
         out = BatchPolesResponse(not_found=missing)
-        for pid in pids:
-            out.poles.append(self.details.pole(pid, include, max_examples=max_examples))
-            self._index_quietly(pid)
+        if len(pids) > MAX_BATCH_POLES:
+            out.notes.append(
+                f"only the first {MAX_BATCH_POLES} of {len(pids)} poles were read; ask for the rest separately"
+            )
+            pids = pids[:MAX_BATCH_POLES]
+        for pid in pids:  # through pole(), so a batch shares the same few upstream fetch slots
+            out.poles.append(self.pole(pid, include, max_examples=max_examples))
         out.took_ms = round((time.perf_counter() - started) * 1000, 2)
         return out
 
@@ -288,7 +347,9 @@ class Atlas:
             for pid, mode_index, score, label in sem.query(text, top=top):
                 items.append(item(pid, score, mode_index, label))
             if not items:
-                notes.append("None of the words occur in the atlas vocabulary (labels are written in English).")
+                notes.append(
+                    "None of the words occur in the atlas vocabulary (labels are written in English)."
+                )
             return SimilarResponse(anchor=text, by="text", method=method, items=items, notes=notes)
         if not pole:
             raise ValueError("give a pole or a text")
@@ -298,7 +359,9 @@ class Atlas:
                 items.append(item(other, score, mode_index, label))
             if not items:
                 notes.append(f"{pid} has no mode {mode} with a label.")
-            return SimilarResponse(anchor=f"{pid} mode {mode}", by="mode", method=method, items=items, notes=notes)
+            return SimilarResponse(
+                anchor=f"{pid} mode {mode}", by="mode", method=method, items=items, notes=notes
+            )
         for other, score in sem.similar_poles(pid, top=top):
             items.append(item(other, score))
         if not items:
@@ -319,10 +382,12 @@ class Atlas:
             found, _missing = self.expand(selection.ids)
             out.update(dict.fromkeys(found))
         if selection.query is not None:
-            query = selection.query.model_copy(update={"group_by": "pole", "snippets": False})
+            query = selection.query.model_copy(update={"snippets": False})
             out.update(dict.fromkeys(hit.pid for hit in self.iter_search(query)))
         if selection.similar_to_text:
-            for pid, _mode, score, _label in self.semantic.query(selection.similar_to_text, top=selection.top):
+            for pid, _mode, score, _label in self.semantic.query(
+                selection.similar_to_text, top=selection.top
+            ):
                 if selection.min_score is None or score >= selection.min_score:
                     out[pid] = None
         if selection.similar_to_pole:
@@ -380,9 +445,11 @@ class Atlas:
             self.index_mirrored(plan.poles, examples=request.index_examples)
         return plan, report
 
-    def mirror_in_background(self, request: MirrorRequest, label: str = "") -> MirrorJob:
+    def mirror_in_background(
+        self, request: MirrorRequest, label: str = "", *, plan: MirrorPlan | None = None
+    ) -> MirrorJob:
         """Queue a selection for fetching (non-blocking).  Used by the API."""
-        plan = self.plan_mirror(request)
+        plan = plan or self.plan_mirror(request)
 
         def after(job: MirrorJob) -> None:
             if request.index:

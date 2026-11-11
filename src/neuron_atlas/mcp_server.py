@@ -6,36 +6,73 @@ Two ways to run it:
 * mounted at ``/mcp`` by the API  - streamable HTTP, for remote clients
 
 Tool results are written for a language model: compact, with the firing token
-marked «like this», and capped in length (``max_chars``) so that one call never
-floods the context window.
+marked «like this», and kept within a length budget (``max_chars``) so that one
+call never floods the context window.  A document that is too long is first
+shortened where it loses least (fewer example passages, then no preceding
+context) and only then cut; every shortening is said at the end of the answer.
+Mistakes in a call come back as a readable tool error, so the model can retry.
 """
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 import anyio
+from pydantic import ValidationError
 
 try:  # MCP Python SDK 2.x
     from mcp.server.mcpserver import MCPServer
-except ImportError:  # SDK 1.x: same class under its old name
+    from mcp.server.mcpserver.exceptions import ToolError
+except ImportError:  # SDK 1.x: same classes under their old names
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
+    from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[no-redef]
 
 from .config import Settings
 from .glossary import GLOSSARY
-from .models import MirrorRequest, SearchQuery, Selection
-from .service import Atlas
+from .models import Example, MirrorRequest, PoleDetail, SearchQuery, Selection
+from .service import Atlas, NotFound
+from .upstream import AtlasError
 
 INSTRUCTIONS = (
     "Search and read Goodfire's Qwen3.6 Neuron Atlas: what individual neurons of the language model "
     "Qwen3.6-35B-A3B respond to. A neuron (e.g. L30_E47_N449) has a positive and a negative pole "
     "(L30_E47_N449__pos / __neg); a pole fires in one or several modes (meanings). "
     "Typical flow: search_neurons -> get_pole -> find_similar. All descriptions are in English, so search "
-    "in English. Call glossary once if a term is unclear. Quote ids exactly and name the pole."
+    "in English. Call glossary once if a term is unclear. Quote ids exactly and name the pole. "
+    "Answers are kept within max_chars characters; when one says it was shortened, ask for less or raise max_chars."
 )
 
+#: Length budget of one answer when the call does not name one (about 3,500 tokens).
 _DEFAULT_MAX_CHARS = 14_000
+#: Longest answer any tool gives, whatever ``max_chars`` asks for.
+_HARD_MAX_CHARS = 120_000
+#: Most ids ``get_poles`` reads in one call.
+_MAX_IDS = 25
+#: Keys whose (long) text values are shortened first when a JSON answer is too long.
+_LONG_KEYS = frozenset({"description", "text", "headline"})
+
+
+# --------------------------------------------------------------------------- budgets and errors
+
+
+def _budget(max_chars: int, default: int = _DEFAULT_MAX_CHARS) -> int:
+    """``max_chars`` as asked; 0 or less means the default, and nothing goes above :data:`_HARD_MAX_CHARS`."""
+    value = int(max_chars)
+    return default if value <= 0 else min(value, _HARD_MAX_CHARS)
+
+
+def _message(exc: BaseException) -> str:
+    """A short reason for a failed call: what the model needs to correct it, without a traceback."""
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors()[:4]:
+            where = ".".join(str(p) for p in err.get("loc", ()) if p != "__root__") or "value"
+            parts.append(f"{where}: {err.get('msg', 'invalid value')}")
+        return "invalid argument - " + "; ".join(parts)
+    return str(exc) or exc.__class__.__name__
 
 
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
@@ -45,10 +82,13 @@ def _clip(text: str, max_chars: int) -> str:
     """Cut a Markdown document to about ``max_chars`` without leaving a code fence open."""
     if max_chars <= 0 or len(text) <= max_chars:
         return text
-    cut = text[:max_chars]
+    note = f"\n\n[… cut at {max_chars} characters; ask for fewer sections or examples, or raise max_chars]"
+    # Leave room for the note and a closing fence, so the answer stays within the budget (tiny budgets aside).
+    room = max_chars - len(note) - 8 if max_chars > 4 * len(note) else max_chars
+    cut = text[:room]
     # Prefer to stop at a line end rather than in the middle of a word or a passage line.
     newline = cut.rfind("\n")
-    if newline > max_chars * 0.6:
+    if newline > room * 0.6:
         cut = cut[:newline]
     cut = cut.rstrip()
     fence = None  # the fence that is open at the end of the cut, if any
@@ -63,7 +103,120 @@ def _clip(text: str, max_chars: int) -> str:
             fence = None
     if fence is not None:
         cut += "\n" + fence
-    return cut + f"\n\n[… cut at {max_chars} characters; ask for fewer sections or examples, or raise max_chars]"
+    return cut + note
+
+
+# --------------------------------------------------------------------------- fitting JSON answers
+
+
+def _size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip() + " …"
+
+
+def _shorten(value: Any, limit: int) -> Any:
+    """``value`` with every long text (description, matched text, headline) cut to ``limit`` characters."""
+    if isinstance(value, dict):
+        return {
+            k: _cut(v, limit) if k in _LONG_KEYS and isinstance(v, str) else _shorten(v, limit)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_shorten(v, limit) for v in value]
+    return value
+
+
+def _fit_list(out: dict[str, Any], key: str, budget: int) -> tuple[int, list[str]]:
+    """Make ``out`` fit ``budget`` characters by shortening, then dropping trailing entries of ``out[key]``.
+
+    Returns the number of entries kept and notes on what was shortened.
+    """
+    items = out.get(key) or []
+    if not items or _size(out) <= budget:
+        return len(items), []
+    notes: list[str] = []
+    for limit in (300, 120):
+        out[key] = _shorten(items, limit)
+        if _size(out) <= budget:
+            return len(items), [f"long texts cut to {limit} characters to fit max_chars={budget}"]
+    notes.append("long texts cut to 120 characters")
+    shortened = out[key]
+    sizes = [_size(item) + 2 for item in shortened]  # ", " between entries
+    room = budget - _size({**out, key: []})
+    kept = 0
+    while kept < len(shortened) and room - sizes[kept] >= 0:
+        room -= sizes[kept]
+        kept += 1
+    kept = max(1, kept)  # always answer with at least one entry
+    out[key] = shortened[:kept]
+    return kept, notes
+
+
+# --------------------------------------------------------------------------- fitting Markdown documents
+
+
+def _example_lists(detail: PoleDetail) -> list[list[Example]]:
+    lists = [m.examples for m in detail.modes] + [s.examples for s in detail.subcircuits or []]
+    if detail.islands:
+        lists += [i.examples for i in detail.islands.islands]
+    return lists
+
+
+def _with_examples(detail: PoleDetail, keep: int, *, context: bool) -> PoleDetail:
+    """A copy of ``detail`` with at most ``keep`` examples per list; ``context=False`` also drops preceding text and tokens."""
+    copy = detail.model_copy(deep=True)
+
+    def cut(examples: list[Example]) -> list[Example]:
+        kept = examples[:keep]
+        return kept if context else [e.model_copy(update={"pre": "", "tokens": None}) for e in kept]
+
+    for mode in copy.modes:
+        mode.examples = cut(mode.examples)
+    for sub in copy.subcircuits or []:
+        sub.examples = cut(sub.examples)
+    if copy.islands:
+        for island in copy.islands.islands:
+            island.examples = cut(island.examples)
+    return copy
+
+
+def _fit_pole(detail: PoleDetail, budget: int, render: Callable[[PoleDetail], str]) -> str:
+    """Render ``detail`` within ``budget`` characters, giving up example passages before cutting the document.
+
+    Steps: fewer examples per mode, subcircuit and island (down to one), then
+    without the text before each passage and the token values, then without
+    examples; only if that is still too long is the document cut.
+    """
+    text = render(detail)
+    if len(text) <= budget:
+        return text
+    lists = _example_lists(detail)
+    most = max((len(x) for x in lists), default=0)
+    has_context = any(e.pre or e.tokens for x in lists for e in x)
+    steps = [(keep, True) for keep in range(most - 1, 0, -1)]
+    if most and has_context:
+        steps.append((1, False))
+    if most:
+        steps.append((0, False))
+    for keep, context in steps:
+        text = render(_with_examples(detail, keep, context=context))
+        what = (
+            f"at most {keep} example{'s' if keep != 1 else ''} per mode/subcircuit"
+            if keep
+            else "no example passages"
+        )
+        if not context and keep:
+            what += ", without the text before each passage and the token values"
+        note = f"\n\n[shortened to fit max_chars={budget}: {what}; ask for fewer sections or raise max_chars]"
+        if len(text) + len(note) <= budget:
+            return text + note
+    return _clip(text, budget)
+
+
+# --------------------------------------------------------------------------- tools
 
 
 def _hit(hit: Any) -> dict[str, Any]:
@@ -72,7 +225,7 @@ def _hit(hit: Any) -> dict[str, Any]:
         "id": hit.pid,
         "display": hit.display,
         "category": hit.category_words,
-        "description": hit.description if len(hit.description) <= 600 else hit.description[:600] + " …",
+        "description": _cut(hit.description, 600),
     }
     if hit.headline:
         out["headline"] = hit.headline
@@ -82,12 +235,20 @@ def _hit(hit: Any) -> dict[str, Any]:
         out["simulatability"] = hit.simulatability
     if hit.matches:
         out["matched"] = [
-            {k: v for k, v in (("in", m.field), ("mode", m.mode_index), ("share", m.share), ("text", m.text)) if v is not None}
+            {
+                k: v
+                for k, v in (("in", m.field), ("mode", m.mode_index), ("share", m.share), ("text", m.text))
+                if v is not None
+            }
             for m in hit.matches[:3]
         ]
     if hit.atlas_url:
         out["url"] = hit.atlas_url
     return out
+
+
+def _parts(include: str) -> list[str]:
+    return [p.strip() for p in include.split(",") if p.strip()] or ["modes"]
 
 
 def build_server(atlas: Atlas) -> MCPServer:
@@ -96,7 +257,13 @@ def build_server(atlas: Atlas) -> MCPServer:
     settings = atlas.settings
 
     async def run(fn: Any, *args: Any) -> Any:
-        return await anyio.to_thread.run_sync(fn, *args)
+        """Run blocking work in a thread; the caller's mistakes come back as readable tool errors."""
+        try:
+            return await anyio.to_thread.run_sync(fn, *args)
+        except ToolError:
+            raise
+        except (NotFound, AtlasError, ValueError) as exc:  # unknown id, bad argument, upstream unavailable
+            raise ToolError(_message(exc)) from exc
 
     @server.tool()
     async def search_neurons(
@@ -106,56 +273,114 @@ def build_server(atlas: Atlas) -> MCPServer:
         match: str = "auto",
         group_by: str = "pole",
         sort: str = "relevance",
+        max_chars: int = _DEFAULT_MAX_CHARS,
     ) -> dict[str, Any]:
         """Search the atlas for poles (one sign of a neuron) by what they respond to.
 
-        query: words, "exact phrases", -exclusions, prefix*, OR - or a neuron/pole id.
-          Inline filters can be added: layer:30 expert:47 pole:neg cat:mono,fn,poly,dark
+        query: words, "exact phrases", -exclusions, prefix*, OR (in capitals) - or a neuron/pole id.
+          Inline filters (no space after the colon): layer:30 expert:47 pole:neg cat:mono,fn,poly,dark
           modes:>=3 sim:>0.8 has:overview sample:public   (sample:public = the 3,000 poles on goodfire.com)
         match: auto (words, then substring) | semantic (rank by meaning) | substring | regex
         group_by: pole | neuron (both poles folded) | mode (one hit per matching mode)
         sort: relevance | simulatability | layer | modes | damage | share | random | id
         Returns hits with ids to pass to get_pole, the total count and next_offset for paging.
+        max_chars: length budget of the answer; long descriptions are cut first, then the page is shortened
+          (next_offset then continues right after the last entry returned).
         """
         limit = max(1, min(int(limit), 50))
+        offset = max(0, int(offset))
+        budget = _budget(max_chars)
 
         def work() -> dict[str, Any]:
             res = atlas.search(
-                SearchQuery(q=query, limit=limit, offset=max(0, offset), match=match, group_by=group_by, sort=sort)  # type: ignore[arg-type]
+                SearchQuery(q=query, limit=limit, offset=offset, match=match, group_by=group_by, sort=sort)  # type: ignore[arg-type]
             )
             out: dict[str, Any] = {"total": res.total, "next_offset": res.next_offset}
+            key = None
             if res.hits:
-                out["hits"] = [_hit(h) for h in res.hits]
-            if res.neurons:
+                key, out["hits"] = "hits", [_hit(h) for h in res.hits]
+            elif res.neurons:
+                key = "neurons"
                 out["neurons"] = [
-                    {"id": n.did, "display": n.display, "poles": [_hit(p) for p in n.poles]} for n in res.neurons
+                    {"id": n.did, "display": n.display, "poles": [_hit(p) for p in n.poles]}
+                    for n in res.neurons
                 ]
-            if res.modes:
+            elif res.modes:
+                key = "modes"
                 out["modes"] = [
-                    {"pole": m.pid, "display": m.display, "mode": m.mode_index, "label": m.label, "share": m.share}
+                    {
+                        "pole": m.pid,
+                        "display": m.display,
+                        "mode": m.mode_index,
+                        "label": m.label,
+                        "share": m.share,
+                    }
                     for m in res.modes
                 ]
-            if res.notes:
-                out["notes"] = res.notes
+            notes = list(res.notes)
+            if key:
+                shown = len(out[key])
+                kept, fit_notes = _fit_list(out, key, budget)
+                notes += fit_notes
+                if kept < shown:
+                    out["next_offset"] = offset + kept
+                    notes.append(
+                        f"only {kept} of the {shown} entries on this page fit max_chars={budget}; "
+                        f"continue with offset={offset + kept}"
+                    )
+            if notes:
+                out["notes"] = notes
             return out
 
         return await run(work)
 
     @server.tool()
-    async def batch_search(queries: list[str], limit: int = 5, match: str = "auto") -> dict[str, Any]:
-        """Run several searches at once (same query syntax as search_neurons). Returns one result list per query."""
+    async def batch_search(
+        queries: list[str], limit: int = 5, match: str = "auto", max_chars: int = _DEFAULT_MAX_CHARS
+    ) -> dict[str, Any]:
+        """Run several searches at once (same query syntax as search_neurons). Returns one result list per query.
+
+        max_chars: length budget of the whole answer; when it is too small, long texts are cut and then every
+        query keeps fewer hits (its total still tells how many there are).
+        """
         limit = max(1, min(int(limit), 25))
-        if len(queries) > min(settings.max_batch_size, 50):
-            raise ValueError(f"at most {min(settings.max_batch_size, 50)} queries per call")
+        most = min(settings.max_batch_size, 50)
+        budget = _budget(max_chars)
 
         def work() -> dict[str, Any]:
+            if len(queries) > most:
+                raise ValueError(f"at most {most} queries per call; split the list")
             results = atlas.batch_search([SearchQuery(q=q, limit=limit, match=match) for q in queries])  # type: ignore[arg-type]
-            return {
+            out: dict[str, Any] = {
                 "results": [
-                    {"query": q, "total": r.total, "hits": [_hit(h) for h in r.hits]}
+                    {
+                        "query": q,
+                        "total": r.total,
+                        "hits": [_hit(h) for h in r.hits],
+                        **({"notes": r.notes} if r.notes else {}),
+                    }
                     for q, r in zip(queries, results, strict=True)
                 ]
             }
+            if _size(out) <= budget:
+                return out
+            notes: list[str] = []
+            for cut in (300, 120):
+                out["results"] = _shorten(out["results"], cut)
+                notes = [f"long texts cut to {cut} characters to fit max_chars={budget}"]
+                if _size(out) <= budget:
+                    out["notes"] = notes
+                    return out
+            per_query = max((len(r["hits"]) for r in out["results"]), default=0)
+            full = out["results"]
+            while per_query > 1:
+                per_query -= 1
+                out["results"] = [{**r, "hits": r["hits"][:per_query]} for r in full]
+                if _size(out) <= budget:
+                    break
+            notes.append(f"each query shows at most {per_query} hit(s) to fit max_chars={budget}")
+            out["notes"] = notes
+            return out
 
         return await run(work)
 
@@ -177,74 +402,104 @@ def build_server(atlas: Atlas) -> MCPServer:
           landscape   - firing and damage shares per mode weighted to real text, strength levels
           circuit     - upstream input groups and downstream readers of the neuron
           islands     - the older island-based read
-        max_examples: examples per mode (0-12). max_chars: length cap of the answer.
+          tokens      - per-token activations of the example passages
+        max_examples: examples per mode (0-12).
+        max_chars: length budget; a longer document first gets fewer examples, then no context, then is cut.
         """
+        budget = _budget(max_chars)
 
         def work() -> str:
             from .render import pole_markdown
 
-            parts = [p.strip() for p in include.split(",") if p.strip()] or ["modes"]
-            detail = atlas.pole(id, parts, max_examples=max(0, min(int(max_examples), 12)))
-            return _clip(pole_markdown(detail), max_chars)
+            detail = atlas.pole(id, _parts(include), max_examples=max(0, min(int(max_examples), 12)))
+            return _fit_pole(detail, budget, pole_markdown)
 
         return await run(work)
 
     @server.tool()
-    async def get_poles(ids: list[str], include: str = "modes", max_examples: int = 1, max_chars: int = 24_000) -> str:
-        """Read several poles at once (Markdown). A neuron id without a pole returns both poles."""
+    async def get_poles(
+        ids: list[str], include: str = "modes", max_examples: int = 1, max_chars: int = 24_000
+    ) -> str:
+        """Read several poles at once (Markdown), at most 25 ids per call.
+
+        A neuron id without a pole returns both poles. max_chars is the budget of the whole answer, shared
+        evenly by the poles; each is shortened like get_pole does.
+        """
+        budget = _budget(max_chars, 24_000)
 
         def work() -> str:
             from .render import pole_markdown
 
-            parts = [p.strip() for p in include.split(",") if p.strip()] or ["modes"]
-            res = atlas.poles(ids[:25], parts, max_examples=max(0, min(int(max_examples), 6)))
-            text = "\n\n---\n\n".join(pole_markdown(d) for d in res.poles)
+            res = atlas.poles(ids[:_MAX_IDS], _parts(include), max_examples=max(0, min(int(max_examples), 6)))
+            notes = list(res.notes)
+            if len(ids) > _MAX_IDS:
+                rest = ids[_MAX_IDS:]
+                shown = ", ".join(rest[:10]) + (" …" if len(rest) > 10 else "")
+                notes.append(f"Not read (more than {_MAX_IDS} ids per call; ask again for these): {shown}")
             if res.not_found:
-                text += "\n\nNot found: " + ", ".join(res.not_found)
-            return _clip(text, max_chars)
+                notes.append("Not found: " + ", ".join(res.not_found))
+            tail = "".join(f"\n\n{note}" for note in notes)
+            share = max(1_500, (budget - len(tail)) // max(1, len(res.poles)) - 7)
+            text = "\n\n---\n\n".join(_fit_pole(d, share, pole_markdown) for d in res.poles)
+            return _clip(text, max(0, budget - len(tail))) + tail if text else tail.strip()
 
         return await run(work)
 
     @server.tool()
     async def get_neuron(id: str, include_circuit: bool = False, max_chars: int = _DEFAULT_MAX_CHARS) -> str:
         """Read one neuron (both poles side by side) as Markdown; optionally with its circuit (inputs and readers)."""
+        budget = _budget(max_chars)
 
         def work() -> str:
             from .render import neuron_markdown
 
-            return _clip(neuron_markdown(atlas.neuron(id, ("circuit",) if include_circuit else ())), max_chars)
+            return _clip(neuron_markdown(atlas.neuron(id, ("circuit",) if include_circuit else ())), budget)
 
         return await run(work)
 
     @server.tool()
     async def find_similar(
-        pole: str | None = None, mode: int | None = None, text: str | None = None, top: int = 10
+        pole: str | None = None,
+        mode: int | None = None,
+        text: str | None = None,
+        top: int = 10,
+        max_chars: int = _DEFAULT_MAX_CHARS,
     ) -> dict[str, Any]:
         """Poles or modes with a similar meaning.
 
         Give `pole` (whole pole), `pole` + `mode` (one mode of it), or `text` (free text, English).
         Returns ids with a similarity score (cosine; 1 = same wording).
         """
+        budget = _budget(max_chars)
 
         def work() -> dict[str, Any]:
             res = atlas.similar(pole=pole, mode=mode, text=text, top=max(1, min(int(top), 50)))
-            return {
+            out: dict[str, Any] = {
                 "anchor": res.anchor,
                 "method": res.method,
                 "items": [
                     {
                         k: v
                         for k, v in (
-                            ("id", i.pid), ("display", i.display), ("score", i.score), ("mode", i.mode_index),
+                            ("id", i.pid),
+                            ("display", i.display),
+                            ("score", i.score),
+                            ("mode", i.mode_index),
                             ("label", i.label or None),
-                            ("description", (i.description[:300] + " …") if len(i.description) > 300 else i.description),
+                            ("description", _cut(i.description, 300)),
                         )  # fmt: skip
                         if v is not None
                     }
                     for i in res.items
                 ],
-                "notes": res.notes,
+                "notes": list(res.notes),
             }
+            shown = len(out["items"])
+            kept, fit_notes = _fit_list(out, "items", budget)
+            out["notes"] += fit_notes
+            if kept < shown:
+                out["notes"].append(f"only the {kept} closest of {shown} fit max_chars={budget}")
+            return out
 
         return await run(work)
 
@@ -288,15 +543,20 @@ def build_server(atlas: Atlas) -> MCPServer:
             out: dict[str, Any] = {"estimate": plan.estimate(), "sample_poles": plan.poles[:15]}
             if not download:
                 return out
-            if not settings.allow_mirror or not atlas.source.can_fetch():
+            if not settings.allow_mirror:
                 out["download"] = "not permitted on this server"
+            elif not atlas.source.can_fetch(remote=True):
+                out["download"] = "not possible: this server runs offline"
             elif len(plan.poles) > settings.max_mirror_poles:
                 out["download"] = (
                     f"refused: {len(plan.poles)} poles exceed this server's limit of {settings.max_mirror_poles} "
                     "per job; narrow the region or use the command line (neuron-atlas mirror)"
                 )
             else:
-                out["download"] = atlas.mirror_in_background(request, label="mcp").as_dict()
+                try:
+                    out["download"] = atlas.mirror_in_background(request, label="mcp", plan=plan).as_dict()
+                except ValueError as exc:  # the job queue is full
+                    out["download"] = f"refused: {exc}"
             return out
 
         return await run(work)
@@ -305,17 +565,26 @@ def build_server(atlas: Atlas) -> MCPServer:
 
 
 def http_app(server: MCPServer, settings: Settings) -> Any:
-    """Starlette app that serves the MCP server at ``/mcp`` (stateless, JSON responses)."""
-    kwargs: dict[str, Any] = {"streamable_http_path": "/mcp", "stateless_http": True, "json_response": True}
+    """Starlette app that serves the MCP server at its root (the API mounts it at ``/mcp``).
+
+    Stateless, with JSON responses.  The SDK's own DNS-rebinding protection is
+    configured with the same host names as the API (plus the CORS origins), so
+    the two never disagree about who may call.
+    """
+    kwargs: dict[str, Any] = {"streamable_http_path": "/", "stateless_http": True, "json_response": True}
     try:
         from mcp.server.transport_security import TransportSecuritySettings
 
         if "*" in settings.allowed_hosts:
             security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
         else:
-            local = ["localhost", "127.0.0.1", "[::1]"]
-            hosts = [h for name in [*local, *settings.allowed_hosts] for h in (name, f"{name}:*")]
+            from .gate import LOCAL_HOSTS, host_name
+
+            names = {host_name(h) for h in (*LOCAL_HOSTS, *settings.allowed_hosts) if h}
+            names = {f"[{n}]" if ":" in n else n for n in names}  # IPv6 literals appear bracketed in Host
+            hosts = [h for name in sorted(names) for h in (name, f"{name}:*")]
             origins = [f"{scheme}://{h}" for h in hosts for scheme in ("http", "https")]
+            origins += [o.rstrip("/") for o in settings.cors_origins if o and o != "*"]
             security = TransportSecuritySettings(
                 enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
             )
@@ -325,9 +594,9 @@ def http_app(server: MCPServer, settings: Settings) -> Any:
     try:
         return server.streamable_http_app(**kwargs)
     except TypeError:  # SDK 1.x: options live on the server's settings object
-        for key in ("streamable_http_path", "stateless_http", "json_response"):
+        for key, value in kwargs.items():
             if hasattr(server.settings, key):
-                setattr(server.settings, key, kwargs[key])
+                setattr(server.settings, key, value)
         return server.streamable_http_app()
 
 

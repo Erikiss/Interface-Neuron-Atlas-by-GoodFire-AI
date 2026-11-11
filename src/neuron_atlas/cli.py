@@ -443,17 +443,16 @@ def index(
 def serve(
     host: Annotated[str, typer.Option(help="Interface to bind; 0.0.0.0 makes the server reachable from other machines.")] = "127.0.0.1",
     port: int = 8000,
-    workers: Annotated[int, typer.Option(help="Worker processes.")] = 1,
     reload: Annotated[bool, typer.Option(help="Restart on code changes (development).")] = False,
     log_level: str = "info",
 ) -> None:
-    """Run the web page, the HTTP API and the MCP endpoint."""
+    """Run the web page, the HTTP API and the MCP endpoint (one process; download jobs and limits live in it)."""
     import os
 
     import uvicorn
 
     settings: Settings = _state.get("settings") or Settings.from_env()
-    # Worker processes build their own Atlas from the environment.
+    # The server builds its Atlas from the environment, so hand the command-line options on that way.
     os.environ["ATLAS_DATA_DIR"] = str(settings.data_dir)
     if settings.release_url:
         os.environ["ATLAS_RELEASE_URL"] = settings.release_url
@@ -461,15 +460,20 @@ def serve(
         os.environ["ATLAS_OFFLINE"] = "1"
     os.environ["ATLAS_REQUESTS_PER_SECOND"] = str(settings.requests_per_second)
     os.environ["ATLAS_MAX_CONCURRENCY"] = str(settings.max_concurrency)
-    if host not in ("127.0.0.1", "localhost", "::1") and not settings.api_keys:
-        err.print(
-            "[yellow]warning:[/yellow] the server is reachable from other machines and has no API key "
-            "(set ATLAS_API_KEYS). Re-serving the atlas publicly needs Goodfire's permission."
-        )
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        if not settings.allowed_hosts:
+            err.print(
+                "[yellow]note:[/yellow] the server answers only to the names localhost, 127.0.0.1 and ::1. "
+                "To reach it under another name or address, list that name: "
+                "ATLAS_ALLOWED_HOSTS=atlas.example.org (or * for any; not advisable without an API key)."
+            )
+        if not settings.api_keys:
+            err.print(
+                "[yellow]warning:[/yellow] the server is reachable from other machines and has no API key "
+                "(set ATLAS_API_KEYS). Re-serving the atlas publicly needs Goodfire's permission."
+            )
     err.print(f"Neuron Atlas Interface on http://{host}:{port}  (API docs: /docs, MCP: /mcp)")
-    uvicorn.run(
-        "neuron_atlas.api:create_app", factory=True, host=host, port=port, workers=workers, reload=reload, log_level=log_level
-    )
+    uvicorn.run("neuron_atlas.api:create_app", factory=True, host=host, port=port, reload=reload, log_level=log_level)
 
 
 @app.command()

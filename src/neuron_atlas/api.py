@@ -14,7 +14,6 @@ All handlers are thin wrappers around :class:`neuron_atlas.service.Atlas`.
 # annotation objects of the handlers, which refer to names local to create_app().
 
 import contextlib
-import hmac
 import json
 import threading
 import time
@@ -33,11 +32,13 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
+from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .config import Settings
 from .details import ALL_INCLUDES, DEFAULT_INCLUDES
+from .gate import Gate
 from .glossary import GLOSSARY, llms_txt
 from .models import (
     BatchPolesRequest,
@@ -83,36 +84,11 @@ def _csv_int(value: str | None, name: str) -> list[int] | None:
         raise HTTPException(400, str(exc)) from None
 
 
-class _ClientLimiter:
-    """Per-client sliding budget (requests per minute); in-memory, per process."""
-
-    def __init__(self, per_minute: int):
-        self.per_minute = per_minute
-        self._hits: dict[str, list[float]] = {}
-        self._lock = threading.Lock()
-
-    def allow(self, client: str) -> tuple[bool, int]:
-        if self.per_minute <= 0:
-            return True, 0
-        now = time.monotonic()
-        with self._lock:
-            hits = [t for t in self._hits.get(client, ()) if now - t < 60.0]
-            if len(hits) >= self.per_minute:
-                self._hits[client] = hits
-                return False, max(1, int(60.0 - (now - hits[0])) + 1)
-            hits.append(now)
-            self._hits[client] = hits
-            if len(self._hits) > 20_000:  # forget idle clients
-                for key in [k for k, v in self._hits.items() if not v or now - v[-1] > 60.0]:
-                    del self._hits[key]
-        return True, 0
-
-
 def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, mcp: bool = True) -> FastAPI:
     """Build the application.  Pass an :class:`Atlas` to share one, or settings to create one."""
+    owned = atlas is None
     atlas = atlas or Atlas(settings)
     settings = atlas.settings
-    limiter = _ClientLimiter(settings.client_rate_per_minute)
 
     mcp_server = None
     mcp_app = None
@@ -129,11 +105,18 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
     async def lifespan(_app: FastAPI):  # noqa: ANN202
         warm = threading.Thread(target=_warm, args=(atlas,), name="atlas-warm", daemon=True)
         warm.start()
-        if mcp_server is not None:
-            async with mcp_server.session_manager.run():
+        try:
+            if mcp_server is not None:
+                async with mcp_server.session_manager.run():
+                    yield
+            else:
                 yield
-        else:
-            yield
+        finally:
+            # Stop background downloads so that the process can exit promptly.
+            if owned:
+                atlas.close()
+            else:
+                atlas.stop_jobs()
 
     app = FastAPI(
         title="Neuron Atlas Interface",
@@ -152,45 +135,47 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         lifespan=lifespan,
     )
     app.state.atlas = atlas
+    # Middleware added last runs first: CORS answers preflights, then the gate checks host, key,
+    # rate and body size before anything else runs (see gate.py).
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+    app.add_middleware(Gate, settings=settings)
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(settings.cors_origins),
             allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
             allow_headers=["*"],
+            expose_headers=["Retry-After", "Mcp-Session-Id"],
         )
 
-    # ------------------------------------------------------------------ guards
+    # The gate enforces the key; this only tells /docs and the OpenAPI document how to send it.
+    api = Depends(
+        APIKeyHeader(
+            name="X-API-Key", auto_error=False, description="Needed when the server sets ATLAS_API_KEYS."
+        )
+    )
+    cache_scope = "private" if settings.api_keys else "public"
 
-    def _presented_key(request: Request) -> str:
-        auth = request.headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
-            return auth[7:].strip()
-        return request.headers.get("x-api-key", "") or request.query_params.get("api_key", "")
+    def _known(*names: str):  # noqa: ANN202 - FastAPI dependency
+        """Reject query parameters an endpoint does not know (a typo would otherwise be ignored silently)."""
+        allowed = set(names) | {"api_key"}
 
-    def _key_ok(key: str) -> bool:
-        return any(hmac.compare_digest(key.encode(), k.encode()) for k in settings.api_keys)
+        def check(request: Request) -> None:
+            unknown = sorted(set(request.query_params) - allowed)
+            if unknown:
+                raise HTTPException(
+                    400,
+                    f"unknown parameter(s): {', '.join(unknown)}; known: {', '.join(sorted(allowed - {'api_key'}))}",
+                )
 
-    def guard(request: Request) -> None:
-        key = _presented_key(request)
-        if settings.api_keys and not _key_ok(key):
-            raise HTTPException(401, "missing or wrong API key (send it as 'X-API-Key' or 'Authorization: Bearer …')")
-        client = key or (request.client.host if request.client else "unknown")
-        ok, wait = limiter.allow(client)
-        if not ok:
-            raise HTTPException(429, "too many requests; slow down", headers={"Retry-After": str(wait)})
-
-    @app.middleware("http")
-    async def protect_mcp(request: Request, call_next):  # noqa: ANN001, ANN202
-        # The MCP endpoint is a mounted app, so the dependency above does not cover it.
-        if request.url.path.startswith("/mcp") and settings.api_keys and not _key_ok(_presented_key(request)):
-            return JSONResponse({"error": "unauthorized", "detail": "missing or wrong API key"}, status_code=401)
-        return await call_next(request)
+        return Depends(check)
 
     @app.exception_handler(HTTPException)
     async def _http_error(_request: Request, exc: HTTPException) -> JSONResponse:
-        names = {400: "bad_request", 401: "unauthorized", 404: "not_found", 409: "conflict", 429: "rate_limited"}
+        names = {
+            400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 409: "conflict",
+            413: "too_large", 429: "rate_limited", 503: "busy",
+        }  # fmt: skip
         body = {"error": names.get(exc.status_code, "error"), "detail": exc.detail}
         return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 
@@ -210,12 +195,16 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
     async def _bad_request(_request: Request, exc: ValueError) -> JSONResponse:
         return JSONResponse({"error": "bad_request", "detail": str(exc)}, status_code=400)
 
-    api = Depends(guard)
-
     def _includes(value: str | None, default: tuple[str, ...] = DEFAULT_INCLUDES) -> list[str]:
         items = _csv(value)
         if items is None:
             return list(default)
+        unknown = sorted(set(items) - set(ALL_INCLUDES) - {"all"})
+        if unknown:
+            raise HTTPException(
+                400,
+                f"unknown include value(s): {', '.join(unknown)}; choose from {', '.join(ALL_INCLUDES)} or all",
+            )
         if "all" in items:
             return [i for i in ALL_INCLUDES if i not in ("tokens", "research")] + [
                 i for i in ("tokens", "research") if i in items
@@ -225,10 +214,13 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
     # ------------------------------------------------------------------ meta
 
     @app.get("/healthz", include_in_schema=False)
-    def healthz() -> dict[str, Any]:
+    async def healthz() -> dict[str, Any]:
+        # async on purpose: it must answer even when every worker thread is busy.
         return {"ok": True, "version": __version__}
 
-    @app.get("/api/v1/info", tags=["meta"], dependencies=[api], summary="About this server and the atlas release")
+    @app.get(
+        "/api/v1/info", tags=["meta"], dependencies=[api], summary="About this server and the atlas release"
+    )
     def info() -> dict[str, Any]:
         return atlas.info()
 
@@ -243,10 +235,14 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
     # ------------------------------------------------------------------ search
 
     def _query_from_params(
-        q: Annotated[str, Query(description="Free text, an id, and/or inline filters such as `layer:30 cat:fn`.")] = "",
+        q: Annotated[
+            str, Query(description="Free text, an id, and/or inline filters such as `layer:30 cat:fn`.")
+        ] = "",
         match: Annotated[str, Query(description="auto | words | substring | regex | semantic")] = "auto",
         scope: Annotated[str | None, Query(description="Comma list of labels, deep, examples.")] = None,
-        layer: Annotated[str | None, Query(description="Comma list of layers; ranges like 9..36 allowed.")] = None,
+        layer: Annotated[
+            str | None, Query(description="Comma list of layers; ranges like 9..36 allowed.")
+        ] = None,
         layer_min: int | None = None,
         layer_max: int | None = None,
         expert: Annotated[str | None, Query(description="Comma list of expert indices.")] = None,
@@ -254,17 +250,33 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         pole: Annotated[str | None, Query(description="pos | neg")] = None,
         cat: Annotated[str | None, Query(description="Comma list of mono, fn, poly, dark, none.")] = None,
         verdict: Annotated[str | None, Query(description="monosemantic | polysemantic")] = None,
-        has: Annotated[str | None, Query(description="Comma list: subcircuit, overview, landscape, islands, circuit, simulatability, headline, mirrored.")] = None,
+        has: Annotated[
+            str | None,
+            Query(
+                description="Comma list: subcircuit, overview, landscape, islands, circuit, simulatability, headline, mirrored."
+            ),
+        ] = None,
         lacks: Annotated[str | None, Query(description="Same vocabulary as `has`.")] = None,
         modes_min: int | None = None,
         modes_max: int | None = None,
-        sim_min: Annotated[float | None, Query(description="Lower bound on simulatability (fraction).")] = None,
+        sim_min: Annotated[
+            float | None, Query(description="Lower bound on simulatability (fraction).")
+        ] = None,
         sim_max: float | None = None,
-        damage_min: Annotated[float | None, Query(description="Lower bound on main_damage_share (0..1).")] = None,
+        damage_min: Annotated[
+            float | None, Query(description="Lower bound on main_damage_share (0..1).")
+        ] = None,
         damage_max: float | None = None,
-        sample: Annotated[str, Query(description="all | public (the 3,000 poles on goodfire.com) | hidden")] = "all",
-        ids: Annotated[str | None, Query(description="Comma list of neuron or pole ids to restrict to.")] = None,
-        sort: Annotated[str, Query(description="relevance | simulatability | layer | modes | damage | share | random | id")] = "relevance",
+        sample: Annotated[
+            str, Query(description="all | public (the 3,000 poles on goodfire.com) | hidden")
+        ] = "all",
+        ids: Annotated[
+            str | None, Query(description="Comma list of neuron or pole ids to restrict to.")
+        ] = None,
+        sort: Annotated[
+            str,
+            Query(description="relevance | simulatability | layer | modes | damage | share | random | id"),
+        ] = "relevance",
         order: Annotated[str | None, Query(description="asc | desc")] = None,
         group_by: Annotated[str, Query(description="pole | neuron | mode")] = "pole",
         limit: Annotated[int, Query(ge=0, le=5000)] = 25,
@@ -288,11 +300,26 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         except Exception as exc:  # pydantic.ValidationError -> 400 with a readable message
             raise HTTPException(400, _validation_message(exc)) from None
 
-    @app.get("/api/v1/search", tags=["search"], dependencies=[api], response_model=SearchResponse, summary="Search the atlas")
+    SEARCH_PARAMS = (
+        "q", "match", "scope", "layer", "layer_min", "layer_max", "expert", "neuron", "pole", "cat", "verdict", "has",
+        "lacks", "modes_min", "modes_max", "sim_min", "sim_max", "damage_min", "damage_max", "sample", "ids", "sort",
+        "order", "group_by", "limit", "offset", "facets", "snippets",
+    )  # fmt: skip
+
+    @app.get(
+        "/api/v1/search", tags=["search"], dependencies=[api, _known(*SEARCH_PARAMS)], response_model=SearchResponse,
+        summary="Search the atlas",
+    )  # fmt: skip
     def search_get(query: Annotated[SearchQuery, Depends(_query_from_params)]) -> SearchResponse:
         return atlas.search(query)
 
-    @app.post("/api/v1/search", tags=["search"], dependencies=[api], response_model=SearchResponse, summary="Search the atlas (JSON body)")
+    @app.post(
+        "/api/v1/search",
+        tags=["search"],
+        dependencies=[api],
+        response_model=SearchResponse,
+        summary="Search the atlas (JSON body)",
+    )
     def search_post(query: SearchQuery) -> SearchResponse:
         return atlas.search(query)
 
@@ -305,31 +332,46 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         results = atlas.batch_search(request.queries)
         return BatchSearchResponse(results=results, took_ms=round((time.perf_counter() - started) * 1000, 2))
 
-    @app.get("/api/v1/similar", tags=["search"], dependencies=[api], response_model=SimilarResponse, summary="Poles or modes with a similar meaning")
+    @app.get(
+        "/api/v1/similar",
+        tags=["search"],
+        dependencies=[api],
+        response_model=SimilarResponse,
+        summary="Poles or modes with a similar meaning",
+    )
     def similar(
         pole: Annotated[str | None, Query(description="Pole id to start from.")] = None,
-        mode: Annotated[int | None, Query(description="Mode index of that pole; omit to compare whole poles.")] = None,
+        mode: Annotated[
+            int | None, Query(description="Mode index of that pole; omit to compare whole poles.")
+        ] = None,
         text: Annotated[str | None, Query(description="Or: free text to find modes for.")] = None,
         top: Annotated[int, Query(ge=1, le=1000)] = 20,
     ) -> SimilarResponse:
         return atlas.similar(pole=pole, mode=mode, text=text, top=top)
 
-    @app.get("/api/v1/random", tags=["search"], dependencies=[api], response_model=SearchResponse, summary="A few random poles (optionally filtered)")
+    @app.get(
+        "/api/v1/random", tags=["search"], dependencies=[api, _known(*SEARCH_PARAMS, "seed")],
+        response_model=SearchResponse, summary="A few random poles (optionally filtered; `limit` = how many, at most 50)",
+    )  # fmt: skip
     def random_poles(
         query: Annotated[SearchQuery, Depends(_query_from_params)],
         seed: Annotated[int | None, Query(description="Give a seed to get the same picks again.")] = None,
     ) -> SearchResponse:
         import random
 
-        full = atlas.search(query.model_copy(update={"limit": 0, "offset": 0, "group_by": "pole"}))
+        full = atlas.search(query.model_copy(update={"limit": 0, "offset": 0}), group_by="pole")
         if full.total == 0:
             return full
         rng = random.Random(seed)
         count = min(max(query.limit, 1), full.total, 50)
         picks = sorted(rng.sample(range(full.total), count))
-        out = full.model_copy(update={"limit": count, "notes": [*full.notes, "random picks from the matching poles"]})
+        out = full.model_copy(
+            update={"limit": count, "notes": [*full.notes, "random picks from the matching poles"]}
+        )
         for offset in picks:
-            out.hits.extend(atlas.search(query.model_copy(update={"limit": 1, "offset": offset, "group_by": "pole"})).hits)
+            out.hits.extend(
+                atlas.search(query.model_copy(update={"limit": 1, "offset": offset}), group_by="pole").hits
+            )
         rng.shuffle(out.hits)
         return out
 
@@ -342,30 +384,58 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
     )  # fmt: skip
     def pole(
         ref: str,
-        include: Annotated[str | None, Query(description="Comma list of modes, subcircuits, examples, islands, overview, landscape, circuit, tokens, research - or `all`. Default: modes,examples.")] = None,
-        max_examples: Annotated[int, Query(ge=0, le=12, description="Examples per mode / subcircuit / island.")] = 3,
+        include: Annotated[
+            str | None,
+            Query(
+                description="Comma list of modes, subcircuits, examples, islands, overview, landscape, circuit, tokens, research - or `all`. Default: modes,examples."
+            ),
+        ] = None,
+        max_examples: Annotated[
+            int, Query(ge=0, le=12, description="Examples per mode / subcircuit / island.")
+        ] = 3,
         format: Annotated[str, Query(description="json | md | txt | html (print-ready page)")] = "json",
     ) -> Any:
+        if format.lower() not in ("json", "md", "markdown", "txt", "text", "html"):
+            raise HTTPException(400, "format must be one of json, md, txt, html")
         detail = atlas.pole(ref, _includes(include), max_examples=max_examples)
         return _formatted(detail, format)
 
-    @app.get("/api/v1/poles/{ref}/raw/{kind}", tags=["poles"], dependencies=[api], summary="Untouched upstream JSON of one data set of a pole")
+    @app.get(
+        "/api/v1/poles/{ref}/raw/{kind}",
+        tags=["poles"],
+        dependencies=[api],
+        summary="Untouched upstream JSON of one data set of a pole",
+    )
     def pole_raw(ref: str, kind: str) -> Any:
         if kind not in ("subcircuit", "overview", "landscape", "islands"):
             raise HTTPException(400, "kind must be one of subcircuit, overview, landscape, islands")
         data = atlas.raw(kind, ref)
         if data is None:
             raise HTTPException(404, f"upstream has no {kind} data for {ref}")
-        return JSONResponse(data, headers={"Cache-Control": "public, max-age=86400"})
+        return JSONResponse(data, headers={"Cache-Control": f"{cache_scope}, max-age=86400"})
 
-    @app.post("/api/v1/poles/batch", tags=["poles"], dependencies=[api], response_model=BatchPolesResponse, summary="Many poles in one request")
+    @app.post(
+        "/api/v1/poles/batch",
+        tags=["poles"],
+        dependencies=[api],
+        response_model=BatchPolesResponse,
+        summary="Many poles in one request",
+    )
     def poles_batch(request: BatchPolesRequest) -> BatchPolesResponse:
         return atlas.poles(request.ids, request.include, max_examples=request.max_examples)
 
-    @app.get("/api/v1/neurons/{ref}", tags=["poles"], dependencies=[api], response_model=NeuronDetail, summary="One neuron: both poles, optionally its circuit")
+    @app.get(
+        "/api/v1/neurons/{ref}",
+        tags=["poles"],
+        dependencies=[api],
+        response_model=NeuronDetail,
+        summary="One neuron: both poles, optionally its circuit",
+    )
     def neuron(
         ref: str,
-        include: Annotated[str | None, Query(description="`circuit` adds the neuron's inputs and readers.")] = None,
+        include: Annotated[
+            str | None, Query(description="`circuit` adds the neuron's inputs and readers.")
+        ] = None,
         format: Annotated[str, Query(description="json | md")] = "json",
     ) -> Any:
         detail = atlas.neuron(ref, _csv(include) or ())
@@ -377,7 +447,12 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
             return PlainTextResponse(neuron_markdown(detail), media_type="text/markdown; charset=utf-8")
         raise HTTPException(400, "format must be json or md")
 
-    @app.get("/api/v1/neurons/{ref}/raw/{kind}", tags=["poles"], dependencies=[api], summary="Untouched upstream circuit JSON of a neuron")
+    @app.get(
+        "/api/v1/neurons/{ref}/raw/{kind}",
+        tags=["poles"],
+        dependencies=[api],
+        summary="Untouched upstream circuit JSON of a neuron",
+    )
     def neuron_raw(ref: str, kind: str) -> Any:
         names = {"meta": "circuit_meta", "exemplars": "circuit_exemplars", "incidence": "circuit_incidence"}
         if kind not in names:
@@ -385,7 +460,7 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         data = atlas.raw(names[kind], ref)
         if data is None:
             raise HTTPException(404, f"upstream has no circuit {kind} for {ref}")
-        return JSONResponse(data, headers={"Cache-Control": "public, max-age=86400"})
+        return JSONResponse(data, headers={"Cache-Control": f"{cache_scope}, max-age=86400"})
 
     def _formatted(detail: PoleDetail, fmt: str) -> Any:
         fmt = fmt.lower()
@@ -410,6 +485,11 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         if fmt not in ("ndjson", "csv", "md"):
             raise HTTPException(400, "format must be one of ndjson, csv, md")
         query = query.model_copy(update={"group_by": "pole", "facets": False})
+        if include:
+            include = _includes(",".join(include))
+        # Run the query once before the response starts, so that a bad query is a 400 and not
+        # a broken file that arrived with status 200.
+        atlas.search(query.model_copy(update={"limit": 0, "offset": 0}), group_by="pole")
         want_detail = bool(include)
 
         def details_of(hit: Any) -> PoleDetail | None:
@@ -429,27 +509,48 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
             for hit in atlas.iter_search(query):
                 detail = details_of(hit)
                 if fmt == "ndjson":
-                    obj = detail.model_dump(exclude_none=True) if detail else hit.model_dump(exclude_none=True)
+                    obj = (
+                        detail.model_dump(exclude_none=True) if detail else hit.model_dump(exclude_none=True)
+                    )
                     yield json.dumps(obj, ensure_ascii=False) + "\n"
                 elif fmt == "csv":
                     yield render.csv_row(hit)
                 else:
-                    yield (render.pole_markdown(detail, heading=2) if detail else render.hit_markdown(hit)) + "\n\n"
+                    yield (
+                        render.pole_markdown(detail, heading=2) if detail else render.hit_markdown(hit)
+                    ) + "\n\n"
 
-        media = {"ndjson": "application/x-ndjson", "csv": "text/csv; charset=utf-8", "md": "text/markdown; charset=utf-8"}[fmt]
+        media = {
+            "ndjson": "application/x-ndjson",
+            "csv": "text/csv; charset=utf-8",
+            "md": "text/markdown; charset=utf-8",
+        }[fmt]
         headers = {"Content-Disposition": f'attachment; filename="neuron-atlas-export.{fmt}"'}
         return StreamingResponse(lines(), media_type=media, headers=headers)
 
-    @app.get("/api/v1/export", tags=["export"], dependencies=[api], summary="Stream every hit of a search")
+    @app.get(
+        "/api/v1/export", tags=["export"], dependencies=[api, _known(*SEARCH_PARAMS, "format", "include", "max_examples")],
+        summary="Stream every hit of a search (paging parameters are ignored: everything is exported)",
+    )  # fmt: skip
     def export_get(
         query: Annotated[SearchQuery, Depends(_query_from_params)],
         format: Annotated[str, Query(description="ndjson | csv | md")] = "ndjson",
-        include: Annotated[str | None, Query(description="Detail sections to add for poles that are already mirrored (e.g. modes,examples).")] = None,
+        include: Annotated[
+            str | None,
+            Query(
+                description="Detail sections to add for poles that are already mirrored (e.g. modes,examples)."
+            ),
+        ] = None,
         max_examples: Annotated[int, Query(ge=0, le=12)] = 2,
     ) -> StreamingResponse:
         return _export(query, format, _csv(include) or [], max_examples)
 
-    @app.post("/api/v1/export", tags=["export"], dependencies=[api], summary="Stream every hit of a search (JSON body)")
+    @app.post(
+        "/api/v1/export",
+        tags=["export"],
+        dependencies=[api],
+        summary="Stream every hit of a search (JSON body)",
+    )
     def export_post(
         query: SearchQuery,
         format: Annotated[str, Query(description="ndjson | csv | md")] = "ndjson",
@@ -460,19 +561,34 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
 
     # ------------------------------------------------------------------ geometry
 
-    @app.get("/api/v1/map", tags=["geometry"], dependencies=[api], summary="2-D semantic map of poles or modes")
+    @app.get(
+        "/api/v1/map", tags=["geometry"], dependencies=[api, _known(*SEARCH_PARAMS, "unit", "method", "clusters")],
+        summary="2-D semantic map of poles or modes (of everything a search finds; paging parameters are ignored)",
+    )  # fmt: skip
     def semantic_map(
         query: Annotated[SearchQuery, Depends(_query_from_params)],
         unit: Annotated[str, Query(description="pole | mode")] = "pole",
-        method: Annotated[str, Query(description="pca | umap (needs the optional umap-learn package) | tsne")] = "pca",
-        clusters: Annotated[int, Query(ge=0, le=200, description="Number of k-means clusters to label (0 = none).")] = 0,
+        method: Annotated[
+            str,
+            Query(
+                description="pca | umap (needs the optional umap-learn package; limited size) | tsne (limited size)"
+            ),
+        ] = "pca",
+        clusters: Annotated[
+            int, Query(ge=0, le=200, description="Number of k-means clusters to label (0 = none).")
+        ] = 0,
     ) -> Any:
         from .geometry.maps import semantic_map as build
 
-        pids = [hit.pid for hit in atlas.iter_search(query.model_copy(update={"group_by": "pole", "snippets": False}))]
-        return build(atlas, pids, unit=unit, method=method, clusters=clusters)
+        pids = [hit.pid for hit in atlas.iter_search(query.model_copy(update={"snippets": False}))]
+        return build(atlas, pids, unit=unit, method=method, clusters=clusters, max_slow_points=MAP_SLOW_LIMIT)
 
-    @app.get("/api/v1/graph/{ref}", tags=["geometry"], dependencies=[api], summary="Circuit neighbourhood of a neuron")
+    @app.get(
+        "/api/v1/graph/{ref}",
+        tags=["geometry"],
+        dependencies=[api],
+        summary="Circuit neighbourhood of a neuron",
+    )
     def graph(
         ref: str,
         depth: Annotated[int, Query(ge=1, le=3, description="How many steps to follow.")] = 1,
@@ -484,32 +600,62 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
 
     # ------------------------------------------------------------------ mirror
 
-    @app.post("/api/v1/mirror/plan", tags=["mirror"], dependencies=[api], summary="What a mirror request would download")
+    @app.post(
+        "/api/v1/mirror/plan",
+        tags=["mirror"],
+        dependencies=[api],
+        summary="What a mirror request would download",
+    )
     def mirror_plan(request: MirrorRequest) -> dict[str, Any]:
         plan = atlas.plan_mirror(request)
         return {"estimate": plan.estimate(), "sample_poles": plan.poles[:20]}
 
-    @app.post("/api/v1/mirror", tags=["mirror"], dependencies=[api], summary="Start downloading a selection in the background")
-    def mirror_start(request: MirrorRequest, label: Annotated[str, Query(max_length=200)] = "") -> dict[str, Any]:
-        if not atlas.source.can_fetch():
-            raise HTTPException(409, "this server does not fetch from upstream (offline / ATLAS_ALLOW_REMOTE_FETCH=0)")
+    @app.post(
+        "/api/v1/mirror",
+        tags=["mirror"],
+        dependencies=[api],
+        summary="Start downloading a selection in the background",
+    )
+    def mirror_start(
+        request: MirrorRequest, label: Annotated[str, Query(max_length=200)] = ""
+    ) -> dict[str, Any]:
+        if not settings.allow_mirror:
+            raise HTTPException(
+                403, "this server does not start downloads for API callers (ATLAS_ALLOW_MIRROR=0)"
+            )
+        if not atlas.source.can_fetch(remote=True):
+            raise HTTPException(409, "this server does not fetch from upstream (offline)")
         if request.dry_run:
             return mirror_plan(request)
-        job = atlas.mirror_in_background(request, label)
+        plan = atlas.plan_mirror(request)
+        if len(plan.poles) > settings.max_mirror_poles:
+            raise HTTPException(
+                403,
+                f"{len(plan.poles):,} poles exceed this server's limit of {settings.max_mirror_poles:,} per job "
+                "(ATLAS_MAX_MIRROR_POLES); narrow the selection or use the command line (neuron-atlas mirror)",
+            )
+        job = atlas.mirror_in_background(request, label, plan=plan)
         return job.as_dict()
 
     @app.get("/api/v1/mirror/jobs", tags=["mirror"], dependencies=[api], summary="Mirror jobs of this server")
     def mirror_jobs() -> dict[str, Any]:
         return {"jobs": [job.as_dict() for job in atlas.jobs.list()]}
 
-    @app.get("/api/v1/mirror/jobs/{job_id}", tags=["mirror"], dependencies=[api], summary="Progress of one mirror job")
+    @app.get(
+        "/api/v1/mirror/jobs/{job_id}",
+        tags=["mirror"],
+        dependencies=[api],
+        summary="Progress of one mirror job",
+    )
     def mirror_job(job_id: str) -> dict[str, Any]:
         job = atlas.jobs.get(job_id)
         if job is None:
             raise HTTPException(404, "no such job")
         return job.as_dict()
 
-    @app.delete("/api/v1/mirror/jobs/{job_id}", tags=["mirror"], dependencies=[api], summary="Cancel a mirror job")
+    @app.delete(
+        "/api/v1/mirror/jobs/{job_id}", tags=["mirror"], dependencies=[api], summary="Cancel a mirror job"
+    )
     def mirror_cancel(job_id: str) -> dict[str, Any]:
         if not atlas.jobs.cancel(job_id):
             raise HTTPException(404, "no such running job")
@@ -519,15 +665,15 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
 
     @app.get("/p/{ref}", include_in_schema=False, response_class=HTMLResponse)
     def print_page(
-        request: Request,
         ref: str,
         include: str | None = None,
         max_examples: Annotated[int, Query(ge=0, le=12)] = 3,
     ) -> HTMLResponse:
-        guard(request)
         from . import render
 
-        detail = atlas.pole(ref, _includes(include, ("modes", "examples", "overview")), max_examples=max_examples)
+        detail = atlas.pole(
+            ref, _includes(include, ("modes", "examples", "overview")), max_examples=max_examples
+        )
         return HTMLResponse(render.pole_html(detail))
 
     if WEB_DIR.is_dir():
@@ -544,10 +690,14 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
             return {"name": "Neuron Atlas Interface", "docs": "/docs", "api": "/api/v1/info"}
 
     if mcp_app is not None:
-        # Mounted last and at the root so that POST /mcp works without a redirect.
-        app.mount("/", mcp_app)
+        # The gate serves POST /mcp in place, so no redirect to /mcp/ is needed.
+        app.mount("/mcp", mcp_app)
 
     return app
+
+
+#: Largest map the server computes with UMAP or t-SNE; bigger requests use PCA.
+MAP_SLOW_LIMIT = 6000
 
 
 class _RevalidatedStatic(StaticFiles):
@@ -574,4 +724,3 @@ def _validation_message(exc: Exception) -> str:
             parts.append(f"{where}: {err.get('msg', '')}")
         return "; ".join(parts) or str(exc)
     return str(exc)
-

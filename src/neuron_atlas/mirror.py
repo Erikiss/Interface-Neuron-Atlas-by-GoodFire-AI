@@ -252,10 +252,18 @@ class MirrorJob:
 class MirrorJobs:
     """Runs mirror plans one at a time in a background thread (used by the API server)."""
 
-    def __init__(self, source: AtlasSource, *, after: Callable[[MirrorJob], None] | None = None, keep: int = 50):
+    def __init__(
+        self,
+        source: AtlasSource,
+        *,
+        after: Callable[[MirrorJob], None] | None = None,
+        keep: int = 50,
+        max_queued: int = 10,
+    ):
         self.source = source
         self.after = after
         self.keep = keep
+        self.max_queued = max_queued
         self._jobs: dict[str, MirrorJob] = {}
         self._queue: list[str] = []
         self._lock = threading.Lock()
@@ -267,9 +275,18 @@ class MirrorJobs:
         """Stop accepting jobs, cancel what is queued or running and wait for the worker to finish."""
         with self._wake:
             self._closing = True
+        self.cancel_all(timeout)
+
+    def cancel_all(self, timeout: float = 30.0) -> None:
+        """Cancel what is queued or running and wait for the worker; new jobs are still accepted afterwards."""
+        with self._wake:
             for job in self._jobs.values():
                 if job.state in ("queued", "running"):
                     job._stop.set()
+                    if job.state == "queued":
+                        job.state = "cancelled"
+                        job.finished_at = time.time()
+            self._queue.clear()
             thread = self._thread
             self._wake.notify_all()
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
@@ -286,6 +303,15 @@ class MirrorJobs:
                 job.error = "the server is shutting down"
                 job.finished_at = time.time()
                 return job
+            waiting = [j for j in self._jobs.values() if j.state in ("queued", "running")]
+            # The same files asked for again: hand back the job that already fetches them.
+            for other in waiting:
+                if set(other.plan.missing) >= set(plan.missing):
+                    return other
+            if sum(1 for j in waiting if j.state == "queued") >= self.max_queued:
+                raise ValueError(
+                    f"{self.max_queued} downloads are already waiting; try again when they are done"
+                )
             self._jobs[job.id] = job
             self._queue.append(job.id)
             finished = [j for j in self._jobs.values() if j.state in ("done", "failed", "cancelled")]
@@ -320,7 +346,11 @@ class MirrorJobs:
         while True:
             with self._wake:
                 while not self._queue:
-                    if self._closing or not self._wake.wait(timeout=30):
+                    if self._closing:
+                        self._thread = None
+                        return
+                    # Re-check the queue after a time-out: a job may have arrived just then.
+                    if not self._wake.wait(timeout=30) and not self._queue:
                         self._thread = None
                         return
                 job = self._jobs.get(self._queue.pop(0))

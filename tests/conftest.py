@@ -65,6 +65,7 @@ def settings(tmp_path: Path) -> Settings:
         requests_per_second=0,  # no politeness delay in tests
         max_concurrency=4,
         max_retries=2,
+        allowed_hosts=("testserver",),  # the host name Starlette's TestClient sends
     )
 
 
