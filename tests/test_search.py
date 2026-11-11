@@ -228,3 +228,13 @@ def test_the_model_loader_stays_offline_and_falls_back_to_lsa(tmp_path, monkeypa
     assert isinstance(embedder, LsaEmbedder) and "offline" in note and calls == [{"local_files_only": True}]
     online, note = make_embedder("fastembed", model_dir=tmp_path)
     assert isinstance(online, FastEmbedEmbedder) and note is None and calls[-1] == {}
+
+
+def test_a_leading_minus_excludes_words_only():
+    def parse(text):
+        return parse_query(SearchQuery(q=text))
+
+    assert [t.text for t in parse("hash -base64").negatives] == ["base64"]
+    arrow = parse("->")
+    assert arrow.negatives == [] and [t.text for g in arrow.groups for t in g] == ["->"]
+    assert parse("--verbose").negatives == []

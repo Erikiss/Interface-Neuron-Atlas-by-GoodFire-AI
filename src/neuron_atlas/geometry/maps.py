@@ -69,11 +69,6 @@ def project(
     if float(np.ptp(vectors, axis=0).max()) < 1e-9:
         notes.append("all points have the same vector; they are spread on a line only to stay visible")
         return _line(n), notes
-    if method in ("umap", "tsne") and not np.linalg.norm(vectors, axis=1).all():
-        notes.append(
-            f"{method.upper()} compares directions, and some points have no direction (empty text); used PCA instead"
-        )
-        method = "pca"
     if method in ("umap", "tsne") and max_slow_points is not None and n > max_slow_points:
         notes.append(
             f"{method.upper()} is limited to {max_slow_points:,} points on this server ({n:,} requested); used PCA instead"

@@ -253,7 +253,12 @@ def _parts(include: str) -> list[str]:
 
 def build_server(atlas: Atlas) -> MCPServer:
     """Create the MCP server for an :class:`Atlas`."""
-    server = MCPServer("neuron-atlas", instructions=INSTRUCTIONS)
+    from . import __version__
+
+    try:
+        server = MCPServer("neuron-atlas", instructions=INSTRUCTIONS, version=__version__)
+    except TypeError:  # SDK 1.x has no version argument
+        server = MCPServer("neuron-atlas", instructions=INSTRUCTIONS)
     settings = atlas.settings
 
     async def run(fn: Any, *args: Any) -> Any:

@@ -9,7 +9,7 @@ Stichwort durchsuchbar und ohne Schnittstelle. Dieses Projekt setzt genau dort a
 
 | | Original-Seite | Dieses Interface |
 |---|---|---|
-| Umfang | Stichprobe von 3.000 Polen | alle 6.488 veröffentlichten Pole (Stichprobe ist markiert) |
+| Umfang | Stichprobe von 3.000 Polen | alle 6.492 veröffentlichten Pole und 142 weitere Circuit-Neuronen (Stichprobe ist markiert) |
 | Suche | Teilstring in Kurzbeschreibung | Volltext mit Ranking, Phrasen, Ausschluss, Präfix, ODER, Regex, Ähnlichkeitssuche; Treffer pro Modus |
 | Filter | Kategorie, Layer | zusätzlich Pol, Expert, Anzahl Modi, Simulierbarkeit, Schadensanteil, vorhandene Daten … |
 | Tiefe | Beschreibungen | auf Wunsch auch Modus-/Subcircuit-Texte, Erklärungen, Reports und Beispielpassagen |
@@ -52,7 +52,7 @@ docker compose up -d             # http://localhost:8000, Daten im Volume "atlas
 - **Modus**: eine Bedeutung, auf die ein Pol feuert. Ein Pol hat einen oder mehrere Modi; jeder
   Modus besteht aus **Subcircuits** (Gruppen von Feuerungen mit denselben Ursachen im Modell).
 - **Kategorie**: `mono` (ein Modus), `fn` (ein dominanter Modus), `poly` (mehrere Modi),
-  `dark` (nicht interpretierbar).
+  `dark` (nicht interpretierbar), `none` (noch nicht gelesen).
 - In Beispieltexten ist das Token, auf dem das Neuron feuert, mit `«…»` markiert.
 
 Alle Begriffe mit den Definitionen der Original-Seite: `GET /api/v1/glossary`.
@@ -64,19 +64,23 @@ MCP-Werkzeug `search_neurons` verstehen dieselbe Syntax:
 
 | Eingabe | Bedeutung |
 |---|---|
-| `braille` | Wortsuche (auch Wortanfänge), nach Relevanz sortiert |
+| `braille` | Wortsuche, nach Relevanz sortiert; ganze Wörter zuerst, dann Wortanfänge (ab 3 Zeichen) |
 | `"severe pain"` | exakte Phrase |
 | `hash -base64` | muss „hash“ enthalten, darf „base64“ nicht enthalten |
-| `tokeniz* OR detokeniz*` | Präfix und ODER |
-| `L30/E47/N449`, `+ L30/E47/N449`, `L30_E47_N449__neg` | Neuron bzw. Pol direkt öffnen |
-| `layer:30 expert:47 pole:neg` | Filter direkt in der Suchzeile |
-| `cat:mono,fn` `modes:>=3` `sim:>0.8` `damage:<0.5` | Kategorie, Anzahl Modi, Simulierbarkeit, Schadensanteil |
-| `has:overview` `has:mirrored` `sample:public` | vorhandene Daten; nur die 3.000 Pole der Original-Seite |
-| `in:deep` / `in:examples` | auch lange Texte bzw. Beispielpassagen gespiegelter Pole durchsuchen |
+| `tokeniz* OR detokeniz*`, `chess NOT opening` | Präfix, ODER, UND NICHT – Operatoren nur in Großbuchstaben (`or`, `not` sind normale Wörter) |
+| `C++`, `->`, `:=` | Zeichenfolgen mit Satzzeichen werden als Teilstring gesucht (`-` schließt nur vor einem Wort aus) |
+| `L30/E47/N449`, `+ L30/E47/N449`, `L30_E47_N449__neg` | Neuron bzw. Pol direkt öffnen (`9/11/2001` bleibt Text, solange es kein solches Neuron gibt) |
+| `layer:30 expert:47 pole:neg` | Filter direkt in der Suchzeile – ohne Leerzeichen nach dem Doppelpunkt; in Anführungszeichen ist es Text |
+| `layer:24..36` `cat:mono,fn` `modes:>=3` `sim:>0.8` `damage:<0.5` | Bereich, Kategorie, Anzahl Modi, Simulierbarkeit, Schadensanteil |
+| `has:overview` `lacks:mirrored` `sample:public` | vorhandene/fehlende Daten; nur die 3.000 Pole der Original-Seite |
+| `in:examples`, `in:labels,deep,examples` | Suchbereich ersetzen: Voreinstellung sind Beschriftungen und lange Texte gespiegelter Pole (`labels,deep`); `examples` = Beispielpassagen gespiegelter Pole |
 
 Weitere Schalter: `match=semantic` (nach Bedeutung statt nach Wörtern), `match=substring`
-(Verhalten der Original-Seite), `match=regex`, `group_by=mode` (ein Treffer pro passendem Modus)
-oder `group_by=neuron`, `sort=relevance|simulatability|layer|modes|damage|share|random|id`.
+(Verhalten der Original-Seite), `match=regex` (mit Zeitlimit; abschaltbar über
+`ATLAS_ALLOW_REGEX=0`), `group_by=mode` (ein Treffer pro passendem Modus) oder `group_by=neuron`,
+`sort=relevance|simulatability|layer|modes|damage|share|random|id`. Ein Tippfehler in einem Filter
+(`layer:abc`) oder ein unbekannter Parameter (`?qq=`) wird mit einer verständlichen Fehlermeldung
+abgelehnt statt still ignoriert.
 
 Die Beschreibungen im Atlas sind englisch – die Wortsuche braucht also englische Begriffe.
 
@@ -152,7 +156,16 @@ claude mcp add --transport http neuron-atlas http://127.0.0.1:8000/mcp   # gegen
 
 Werkzeuge: `search_neurons`, `batch_search`, `get_pole`, `get_poles`, `get_neuron`,
 `find_similar`, `plan_region`, `atlas_info`, `glossary`. Die Antworten sind für Sprachmodelle
-aufbereitet (Markdown, Längenbegrenzung über `max_chars`).
+aufbereitet:
+
+- Jede Antwort bleibt unter `max_chars` Zeichen (Voreinstellung 14.000, höchstens 120.000).
+  Lange Pol-Dokumente verlieren zuerst Beispielpassagen, dann deren Vorlauf-Kontext; erst danach
+  wird gekürzt – und am Ende steht immer, was weggelassen wurde. Gekürzte Trefferlisten setzen
+  `next_offset` so, dass die nächste Seite nahtlos anschließt.
+- Fehler (unbekannte Id, falscher Parameter, Filter-Tippfehler) kommen als lesbare Meldung zurück,
+  mit der das Modell den Aufruf korrigieren kann.
+- Mit API-Schlüssel (`ATLAS_API_KEYS`) braucht auch `/mcp` den Header `X-API-Key` oder
+  `Authorization: Bearer …`.
 
 **Ohne MCP:** Jeder Chatbot, der URLs abrufen kann, findet in `/llms.txt` eine Anleitung und in
 `/openapi.json` die vollständige Beschreibung (z. B. als „Action“ einbindbar).
@@ -192,9 +205,21 @@ neuron-atlas mirror --all
 
 Größenordnung des kompletten Atlas: rund 32.000 Dateien, etwa 5 GB Übertragung (gzip, so wird
 auch gespeichert), etwa 22 GB als JSON. Mit der Voreinstellung von 4 Anfragen pro Sekunde
-dauert das gut zwei Stunden. Der Download ist jederzeit abbrechbar und setzt beim nächsten
-Aufruf fort. Über die Oberfläche („Region herunterladen“) und die API geht dasselbe als
-Hintergrund-Job, dort begrenzt auf `ATLAS_MAX_MIRROR_POLES` Pole pro Job.
+dauert das gut zwei Stunden. `--all` umfasst auch die rund 140 Neuronen, die nur der
+Circuit-Index kennt (ohne eigene Pole), und die wenigen Pole, die nur in den Neben-Indizes
+stehen.
+
+- **Abbrechen:** Strg-C hält sofort an; der nächste Aufruf setzt dort fort (vorhandene Dateien
+  werden übersprungen).
+- **Notbremse:** Scheitern viele Dateien hintereinander (Server blockiert, Ausfall, Login-Portal
+  im Netz) oder ist die Platte voll, hört der Lauf von selbst auf und sagt warum. Bittet der
+  Server um eine Pause (HTTP 429/503 mit `Retry-After`), warten alle Anfragen gemeinsam.
+- **Selbstheilung:** Beschädigte oder abgeschnittene Dateien werden erkannt und neu geholt; ein
+  verlorenes oder kaputtes Manifest wird aus den vorhandenen Dateien wieder aufgebaut.
+
+Über die Oberfläche („Region herunterladen“) und die API geht dasselbe als Hintergrund-Job,
+dort begrenzt durch `ATLAS_ALLOW_MIRROR` und `ATLAS_MAX_MIRROR_POLES` (Pole pro Job); höchstens
+zehn Jobs warten gleichzeitig. Ein Job, bei dem keine einzige Datei ankam, endet als „failed“.
 
 ## Geometrie-Analyse
 
@@ -236,14 +261,24 @@ Alle Einstellungen als Umgebungsvariablen (oder Optionen von `neuron-atlas`):
 | `ATLAS_OFFLINE` | `0` | `1`: niemals ins Netz, nur der lokale Spiegel |
 | `ATLAS_RELEASE_URL` | automatisch | bestimmte Atlas-Version festnageln |
 | `ATLAS_REQUESTS_PER_SECOND` / `ATLAS_MAX_CONCURRENCY` | `4` / `4` | Rücksicht gegenüber Goodfires Servern |
-| `ATLAS_EMBEDDER` | `lsa` | `fastembed`, `fastembed:multilingual` oder `fastembed:<Modellname>` |
-| `ATLAS_ALLOW_REMOTE_FETCH` | `1` | dürfen API-Aufrufe fehlende Pole nachladen? |
-| `ATLAS_ALLOW_MIRROR` / `ATLAS_MAX_MIRROR_POLES` | `1` / `500` | Download-Jobs über API und MCP |
-| `ATLAS_API_KEYS` | leer | Komma-Liste; dann ist `X-API-Key` oder `Authorization: Bearer …` nötig |
-| `ATLAS_CLIENT_RATE_PER_MINUTE` | `0` | Anfragen pro Minute je Client (0 = unbegrenzt) |
-| `ATLAS_CORS_ORIGINS` | leer | erlaubte Browser-Ursprünge für fremde Web-Apps |
-| `ATLAS_ALLOWED_HOSTS` | leer | Hostnamen, unter denen `/mcp` antwortet (`*` = alle) |
+| `ATLAS_EMBEDDER` | `lsa` | `fastembed`, `fastembed:multilingual` oder `fastembed:<Modellname>` (offline nur ein schon geladenes Modell) |
+| `ATLAS_ALLOW_REMOTE_FETCH` | `1` | dürfen Anfragen fehlende Pol-Dateien beim Öffnen nachladen? (Index-Dateien und ausdrückliche Downloads sind davon nicht betroffen) |
+| `ATLAS_ALLOW_MIRROR` / `ATLAS_MAX_MIRROR_POLES` | `1` / `500` | Download-Jobs über API und MCP; Pole (und Circuit-Neuronen) pro Job |
+| `ATLAS_ALLOW_REGEX` | `1` | Regex-Suche erlauben (läuft mit Zeitlimit) |
+| `ATLAS_API_KEYS` | leer | Komma-Liste; dann ist `X-API-Key` oder `Authorization: Bearer …` nötig (für `/api/`, `/mcp`, `/p/`) |
+| `ATLAS_CLIENT_RATE_PER_MINUTE` | `0` | Anfragen pro Minute je Client bzw. Schlüssel (0 = unbegrenzt; abgewiesene Schlüssel zählen mit) |
+| `ATLAS_CORS_ORIGINS` | leer | erlaubte Browser-Ursprünge für fremde Web-Apps (gelten auch für `/mcp`) |
+| `ATLAS_ALLOWED_HOSTS` | leer | weitere Hostnamen, unter denen der ganze Server antwortet; ohne Eintrag nur `localhost`, `127.0.0.1`, `::1` (Schutz vor DNS-Rebinding); `*` = alle |
 | `ATLAS_MAX_PAGE_SIZE` / `ATLAS_MAX_BATCH_SIZE` | `500` / `200` | Grenzen für Seiten und Batches |
+
+Ja/Nein-Werte verstehen `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`; alles andere ist ein
+Fehler (damit ein Tippfehler bei `ATLAS_OFFLINE` nicht still „online“ bedeutet).
+
+**Server im Netz.** `neuron-atlas serve` läuft als ein Prozess (Download-Jobs, Drosselung und
+Zähler leben darin; mehrere Worker gibt es bewusst nicht). Soll er von anderen Rechnern erreichbar
+sein: `neuron-atlas serve --host 0.0.0.0`, dazu `ATLAS_ALLOWED_HOSTS` mit dem Namen, unter dem
+er angesprochen wird, und `ATLAS_API_KEYS`. Anfragen über 2 MB werden abgewiesen (413), zu viele
+Anfragen mit 429 und `Retry-After` gebremst.
 
 ## Rechtliches und Rücksicht
 

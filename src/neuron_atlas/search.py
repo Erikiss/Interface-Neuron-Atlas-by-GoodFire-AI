@@ -334,7 +334,8 @@ def parse_query(query: SearchQuery, known: Callable[[str], bool] | None = None) 
             if raw == "NOT":
                 pending_not = True
                 continue
-            negate = raw.startswith("-") and len(raw) > 1
+            # "-word" excludes; "->" or "--flag" are strings to look for, not exclusions.
+            negate = raw.startswith("-") and len(raw) > 1 and (raw[1].isalnum() or raw[1] == "_")
             word = raw[1:] if negate else raw
             prefix = word.endswith("*") and len(word.rstrip("*")) > 0
             term = Term(word.rstrip("*") if prefix else word, prefix=prefix, negate=negate)
