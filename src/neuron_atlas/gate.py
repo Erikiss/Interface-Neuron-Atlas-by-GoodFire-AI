@@ -19,6 +19,8 @@ from __future__ import annotations
 import contextlib
 import hmac
 import json
+import logging
+import re
 import threading
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
@@ -75,6 +77,26 @@ def host_name(host_header: str) -> str:
 
 class _TooLarge(Exception):
     pass
+
+
+class RedactKeys(logging.Filter):
+    """Masks ``api_key=…`` in log lines (uvicorn's access log prints the full request path)."""
+
+    _KEY = re.compile(r"(api_key=)[^&\s\"']+", re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._KEY.sub(r"\1***", a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.msg, str):
+            record.msg = self._KEY.sub(r"\1***", record.msg)
+        return True
+
+
+def redact_access_log() -> None:
+    """Install :class:`RedactKeys` on uvicorn's access logger (once per process)."""
+    log = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, RedactKeys) for f in log.filters):
+        log.addFilter(RedactKeys())
 
 
 class Gate:

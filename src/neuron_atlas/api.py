@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .config import Settings
 from .details import ALL_INCLUDES, DEFAULT_INCLUDES
-from .gate import Gate
+from .gate import Gate, redact_access_log
 from .glossary import GLOSSARY, llms_txt
 from .models import (
     BatchPolesRequest,
@@ -89,6 +89,7 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
     owned = atlas is None
     atlas = atlas or Atlas(settings)
     settings = atlas.settings
+    redact_access_log()  # keys sent as ?api_key= must not end up in log files
 
     mcp_server = None
     mcp_app = None

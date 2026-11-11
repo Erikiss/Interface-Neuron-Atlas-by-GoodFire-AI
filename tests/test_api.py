@@ -249,3 +249,16 @@ def test_limits_on_batches_exports_and_mirrors(client, atlas, settings):
     with TestClient(create_app(atlas, mcp=False)) as c:
         refused = c.post("/api/v1/mirror", json=body)
         assert refused.status_code == 403 and "limit" in refused.json()["detail"]
+
+
+def test_api_keys_in_urls_are_masked_in_the_access_log():
+    import logging
+
+    from neuron_atlas.gate import RedactKeys
+
+    record = logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:5", "GET", "/api/v1/info?api_key=s3cret&x=1", "1.1", 200), None,
+    )  # fmt: skip
+    assert RedactKeys().filter(record) and "s3cret" not in record.getMessage()
+    assert "api_key=***&x=1" in record.getMessage()
