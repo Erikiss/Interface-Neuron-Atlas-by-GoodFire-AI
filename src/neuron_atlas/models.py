@@ -140,7 +140,13 @@ class PoleHit(_Model):
     n_modes: int | None = None
     n_subcircuits: int | None = None
     verdict: str | None = None
-    main_damage_share: float | None = None
+    main_damage_share: float | None = Field(
+        None,
+        description=(
+            "The main mode's share of the pole's damage among its readable modes, over the sampled firings (the "
+            "main mode has the most firings); decides the category fn. Not comparable with landscape damage_share."
+        ),
+    )
     simulatability: float | None = None
     in_public_sample: bool = False
     available: list[str] = Field(default_factory=list, description="Data sets that exist for this pole.")
@@ -212,10 +218,23 @@ class Example(_Model):
     """One passage the pole fires on, as plain text with the firing token marked «like this»."""
 
     source: str = Field(description="Data set the example comes from: subcircuit or islands.")
-    ref: str | None = Field(None, description="Subcircuit / island / example id inside the pole.")
+    ref: str | None = Field(
+        None,
+        description=(
+            "Id of the example inside the pole: '<subcircuit>:<slot>' or 'island<id>:<position in the file>', "
+            "the same in search matches."
+        ),
+    )
     group: str | None = Field(None, description="Sampling role: strongest, typical, weakest, random, …")
     act: float | None = Field(None, description="Peak activation of the neuron in this passage (signed).")
-    a_rel: float | None = Field(None, description="Peak activation divided by the pole's firing threshold θ.")
+    a_rel: float | None = Field(
+        None,
+        description=(
+            "Strength of the firing in multiples of a firing threshold θ. Subcircuit examples use the pole's θ "
+            "(PoleDetail.theta); island examples use the islands data's own θ (one per neuron), which can differ "
+            "from it by a factor of two or more - compare act across the two kinds."
+        ),
+    )
     closed_gate: bool | None = Field(
         None, description="True when the neuron's gate input was negative here (a weak 'leak' firing, Q3/Q4)."
     )
@@ -254,7 +273,8 @@ class NeuronRef(_Model):
         None,
         description=(
             "The unit's mean contribution over this subcircuit's firings. Drivers and opposers carry a "
-            "positive magnitude (the role says which way they push); readers are signed."
+            "positive magnitude (the role says which way they push); readers are signed by the push on the "
+            "reader's own activation (> 0 up, < 0 down)."
         ),
     )
     rest: float | None = Field(None, description="Its mean contribution over the pole's other firings.")
@@ -263,11 +283,25 @@ class NeuronRef(_Model):
 
 
 class CircuitSides(_Model):
-    gate_drivers: list[NeuronRef] = Field(default_factory=list, description="Earlier neurons that open the gate.")
+    """The top units of a subcircuit's circuit; drivers push a signal towards the pole's firing direction."""
+
+    gate_drivers: list[NeuronRef] = Field(
+        default_factory=list, description="Earlier neurons that open the gate (on either pole)."
+    )
     gate_opposers: list[NeuronRef] = Field(default_factory=list, description="Earlier neurons that close the gate.")
-    up_drivers: list[NeuronRef] = Field(default_factory=list, description="Earlier neurons that raise the written value.")
-    up_opposers: list[NeuronRef] = Field(default_factory=list, description="Earlier neurons that lower it.")
-    readers: list[NeuronRef] = Field(default_factory=list, description="Later neurons that read this one.")
+    up_drivers: list[NeuronRef] = Field(
+        default_factory=list,
+        description=(
+            "Earlier neurons that push the up signal towards the pole's sign: they raise it on a positive pole "
+            "and lower it on a negative pole."
+        ),
+    )
+    up_opposers: list[NeuronRef] = Field(
+        default_factory=list, description="Earlier neurons that push the up signal against the pole's sign."
+    )
+    readers: list[NeuronRef] = Field(
+        default_factory=list, description="Later neurons that read this one; see weight for the direction."
+    )
 
 
 class Damage(_Model):
@@ -283,12 +317,13 @@ class Damage(_Model):
 
 
 class StrengthProfile(_Model):
-    """Shares of a subcircuit's firings by strength relative to the threshold θ."""
+    """Shares of a subcircuit's firings (adding up to 1): three strength bins relative to the threshold θ for
+    the firings with the gate open, and one bin for all firings with the gate closed, whatever their strength."""
 
-    ge_theta: float | None = Field(None, description="At or above θ.")
-    mid: float | None = Field(None, description="Between 0.5 θ and θ.")
-    weak: float | None = Field(None, description="Below 0.5 θ.")
-    closed: float | None = Field(None, description="With the gate closed (gate input negative).")
+    ge_theta: float | None = Field(None, description="Gate open, at or above θ.")
+    mid: float | None = Field(None, description="Gate open, between 0.5 θ and θ.")
+    weak: float | None = Field(None, description="Gate open, below 0.5 θ.")
+    closed: float | None = Field(None, description="Gate closed (gate input negative), any strength.")
 
 
 class Subcircuit(_Model):
@@ -358,6 +393,9 @@ class IslandMode(_Model):
 
 
 class IslandsView(_Model):
+    """The older island read of a pole.  Its examples' a_rel use the islands data's own threshold θ (one per
+    neuron), not PoleDetail.theta."""
+
     modes: list[IslandMode] = Field(default_factory=list)
     islands: list[Island] = Field(default_factory=list)
 

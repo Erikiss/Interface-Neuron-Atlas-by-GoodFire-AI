@@ -355,7 +355,11 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
     for this pole (``drives`` / ``opposes``).  ``readers`` are groups of later
     neurons this pole ``raised`` or ``lowered``, with the number of examples in
     which that showed.  ``output_tokens`` are the vocabulary tokens whose
-    logits the neuron pushes most on this pole.
+    logits the neuron pushes most on this pole (signed static weights).
+    ``example_tokens`` are the tokens the circuit data also follows on its
+    stored examples (mostly frequent ones such as ``,`` or `` the``): their
+    weight is the mean *absolute* logit effect over the examples of both poles,
+    so it says nothing about direction and is the same on both poles.
 
     Shape::
 
@@ -369,6 +373,7 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
                       "measured_direction" (only when the measurement contradicts the label), "n_members",
                       "members": [{"unit", "pole", "label", "in_atlas", "weight" (magnitude), "layers_ahead"}]}],
          "output_tokens": [{"token", "weight"}],
+         "example_tokens": [{"token", "mean_abs_effect", "examples_active"}],
          "strongest_contexts": [{"text" (firing token marked «…»), "activation" (raw)}]}
 
     The threshold here is the circuit data's own θ (one per neuron), not the pole's θ of the mode data.
@@ -499,10 +504,18 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
     if line.startswith("no discriminative reading"):
         line = "Uninterpretable: " + line[len("no discriminative reading") :].lstrip(" :;,-")
     want = 1 if pole == "pos" else -1
+    logits = [t for t in meta.get("logits") or [] if isinstance(t, dict)]
+    # Rows with source "target" carry an unsigned mean over the examples of both poles (their sign is
+    # always 1): they belong to neither pole and are listed apart.
     tokens = [
         {"token": _text(t.get("token")), "weight": _num(t.get("w"))}
-        for t in meta.get("logits") or []
-        if isinstance(t, dict) and (t.get("sign") in (None, want))
+        for t in logits
+        if t.get("source") != "target" and t.get("sign") in (None, want)
+    ]
+    example_tokens = [
+        {"token": _text(t.get("token")), "mean_abs_effect": _num(t.get("w")), "examples_active": _int(t.get("n_active"))}
+        for t in logits
+        if t.get("source") == "target"
     ]
     return {
         "neuron": _text(identity.get("did")),
@@ -513,6 +526,7 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
         "inputs": inputs,
         "readers": readers,
         "output_tokens": tokens,
+        "example_tokens": example_tokens,
         "strongest_contexts": [
             {"text": _text(c.get("ctx")).replace("▸", "«").replace("◂", "»"), "activation": _num(c.get("act"))}
             for c in side.get("top_contexts") or []

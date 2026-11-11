@@ -70,6 +70,35 @@ def test_poles_without_a_subcircuit_read_fall_back_to_islands(atlas):
     assert [m.unassigned for m in dark.islands.modes] == [True] and dark.islands.modes[0].islands == [0, 1]
 
 
+def test_island_example_refs_match_the_search_index(atlas):
+    d = atlas.pole(fakeatlas.ISLAND_ONLY, ["islands", "examples", "tokens"], max_examples=12)
+    island = d.islands.islands[0]
+    # Shown by strength (the file holds median, top, random, then one "more" example), numbered by file position.
+    assert [e.ref for e in island.examples] == ["island0:1", "island0:0", "island0:2", "island0:3"]
+    assert [e.group for e in island.examples] == ["strongest", "typical", "random", None]
+    raw = atlas.raw("islands", fakeatlas.ISLAND_ONLY)
+    indexed = {f.ref: f.text for f in atlas.details.text_fields("islands", raw) if f.kind == "example"}
+    for example in island.examples:
+        passage = "".join(f"«{t}»" if i == example.focal_index else t for i, (t, _) in enumerate(example.tokens)).strip()
+        assert indexed[example.ref] == passage
+
+
+def test_island_examples_say_when_their_threshold_differs(atlas, upstream):
+    import json
+
+    path = f"public_atlas_data/islands/poles/{fakeatlas.RIVER}.json"
+    raw = json.loads(upstream.files[path])
+    for isl in raw["islands"]:
+        for e in isl["examples"] + isl["examples_more"]:
+            e["a_over_theta"] = round(abs(e["act"]) / 0.5, 3)  # the islands data's own θ is 0.5, the pole's 0.25
+    upstream.files[path] = json.dumps(raw).encode()
+    d = atlas.pole(fakeatlas.RIVER, ["modes", "examples", "islands"], max_examples=1)
+    assert d.islands.islands[0].examples[0].a_rel == 5.0 and d.modes[0].examples[0].a_rel == 9.0
+    assert any("θ ≈ 0.5" in n and "θ = 0.25" in n for n in d.notes)
+    same = atlas.pole(fakeatlas.MIXED, ["modes", "examples", "islands"], max_examples=1)
+    assert same.islands.islands[0].examples and not any("θ" in n for n in same.notes)  # one θ: nothing to say
+
+
 def test_index_only_view_when_files_may_not_be_fetched(offline_atlas):
     d = offline_atlas.pole(fakeatlas.RIVER, ["modes", "examples", "overview", "landscape", "circuit"])
     assert [m.label for m in d.modes] == ["River names (Danube, Loire) in travel writing and verse"]
@@ -140,6 +169,17 @@ def test_circuit_view_per_pole(atlas, upstream):
     assert [g["id"] for g in neg["inputs"]] == ["g3", "g_single_no"]  # the catch-all is placed by its name
     assert neg["line"].startswith("Uninterpretable: mixed") and neg["output_tokens"][0]["token"] == " oven"
     assert circuit_view({}, "pos")["inputs"] == []
+
+
+def test_circuit_view_keeps_unsigned_target_tokens_apart(upstream):
+    import json
+
+    meta = json.loads(upstream.files["moe_circuit_explorer_data/L4_E1_N10/meta.json"])
+    # Rows with source "target" hold a mean |effect| over the examples of both poles; their sign is always 1.
+    meta["logits"].append({"token": ",", "token_id": 11, "w": 0.003, "sign": 1, "source": "target", "n_active": 7})
+    pos, neg = circuit_view(meta, "pos"), circuit_view(meta, "neg")
+    assert [t["token"] for t in pos["output_tokens"]] == [" river"] and [t["token"] for t in neg["output_tokens"]] == [" oven"]
+    assert pos["example_tokens"] == neg["example_tokens"] == [{"token": ",", "mean_abs_effect": 0.003, "examples_active": 7}]
 
 
 def test_neuron_view_and_errors(atlas):

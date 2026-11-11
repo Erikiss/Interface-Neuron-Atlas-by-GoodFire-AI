@@ -366,16 +366,33 @@ addEventListener('resize',draw); draw();
 """
 
 
+def _script_json(data: Any) -> str:
+    """JSON that is safe inside an inline ``<script>``.
+
+    Labels are free text: ``<!--`` followed later by ``<script>`` would put the HTML parser into
+    a state in which the page's own ``</script>`` no longer ends the script.  ``<``, ``>`` and ``&``
+    (and the two line separators old parsers trip on) only occur inside JSON strings, where their
+    ``\\uXXXX`` escapes mean the same.
+    """
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    for char in ("&", "<", ">", chr(0x2028), chr(0x2029)):
+        text = text.replace(char, f"\\u{ord(char):04x}")
+    return text
+
+
 def write_map_html(data: dict[str, Any], path: Path | str, title: str = "Neuron Atlas map") -> None:
     """Write a self-contained interactive viewer for a :func:`semantic_map` result."""
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    page = (
-        _VIEWER.replace("__TITLE__", html.escape(title))
-        .replace("__UNIT__", html.escape(str(data.get("unit", "pole"))))
-        .replace("__METHOD__", html.escape(str(data.get("method", "pca")).upper()))
-        .replace("__EMBEDDING__", html.escape(str(data.get("embedding", "semantic"))))
-        .replace("__DATA__", payload)
-    )
+    import re
+
+    values = {
+        "TITLE": html.escape(title),
+        "UNIT": html.escape(str(data.get("unit", "pole"))),
+        "METHOD": html.escape(str(data.get("method", "pca")).upper()),
+        "EMBEDDING": html.escape(str(data.get("embedding", "semantic"))),
+        "DATA": _script_json(data),
+    }
+    # One pass, so that a placeholder inside a value (a title such as "__DATA__") stays text.
+    page = re.sub(r"__(TITLE|UNIT|METHOD|EMBEDDING|DATA)__", lambda m: values[m.group(1)], _VIEWER)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(page, encoding="utf-8")

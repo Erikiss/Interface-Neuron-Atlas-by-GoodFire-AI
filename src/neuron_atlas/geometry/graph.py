@@ -15,6 +15,17 @@ Sign conventions (from the explorer):
 * ``role`` says what that means for the hub's pole: ``drives`` or ``opposes``.
 * reader edge: ``effect`` ``raised`` / ``lowered`` is the direction; the stored
   weight's own sign is not reliable, so its magnitude is used.
+
+When a hub's circuit file is not at hand, :func:`hub_edges` falls back to the
+top units of its subcircuit files and maps them onto the same conventions:
+gate drivers raise the gate on either pole; up drivers push the up signal
+towards the pole's sign (they raise it on a positive pole and lower it on a
+negative one); opposers do the opposite.  A reader's signed value there is the
+push on the reader's own activation, so it names the reader's pole that the hub
+pole raises.
+
+Member labels describe a neuron-*pole*; a node that takes part through both of
+its poles is labelled ``+: … / −: …``.
 """
 
 from __future__ import annotations
@@ -54,6 +65,25 @@ def pole_word(sign: Any) -> str | None:
     if sign in ("-", "−", "neg"):
         return "neg"
     return None
+
+
+def pole_label(texts: dict[str | None, str], limit: int = 300) -> str:
+    """One node label from descriptions keyed by pole (``pos`` / ``neg``; ``None`` = pole unknown).
+
+    Each pole's text gets its sign (``+: …``, ``−: …``); a neuron described through both poles
+    gets both, joined by `` / ``.  Texts are cut to ``limit`` characters in all.
+    """
+
+    def cut(text: str, n: int) -> str:
+        return text if len(text) <= n else text[:n] + " …"
+
+    signed = [(pole, texts[pole]) for pole in ("pos", "neg") if texts.get(pole)]
+    if not signed:
+        return cut(texts.get(None) or "", limit)
+    if len(signed) == 2 and signed[0][1] == signed[1][1]:
+        return cut(signed[0][1], limit)  # the same text for both poles: it describes the neuron
+    each = limit // len(signed)
+    return " / ".join(("+: " if pole == "pos" else "−: ") + cut(text, each) for pole, text in signed)
 
 
 def group_side(group: dict[str, Any]) -> str | None:
@@ -175,7 +205,12 @@ def circuit_edge_rows(did: str, meta: dict[str, Any]) -> Iterator[Row]:
 
 
 def circuit_group_rows(did: str, meta: dict[str, Any]) -> Iterator[Row]:
-    """One row per input / reader group of a circuit file, with the numbers the explorer shows."""
+    """One row per input / reader group of a circuit file, with the numbers the explorer shows.
+
+    ``pole`` is the group's home pole.  The explorer also lists some reader groups on the other
+    pole; ``examples_other_pole`` / ``mean_effect_other_pole`` hold what it measured there (the
+    sign of that mean is the direction on the other pole, whatever the group's label says).
+    """
     groups = meta.get("groups") or {}
     view = meta.get("pole_view") or {}
     shown: dict[tuple[str, str], dict[str, Any]] = {}
@@ -197,11 +232,14 @@ def circuit_group_rows(did: str, meta: dict[str, Any]) -> Iterator[Row]:
             "up": _num((agg.get("up") or {}).get("mean_signed")),
             "examples": None,
             "mean_effect": None,
+            "examples_other_pole": None,
+            "mean_effect_other_pole": None,
             "description": clean_group_description(g),
         }
     for g in groups.get("readers") or []:
         side = group_side(g)
         row = shown.get((side or "", str(g.get("id")))) or {}
+        other = shown.get(({"+": "-", "-": "+"}.get(side or "", ""), str(g.get("id")))) or {}
         yield {
             "hub": did,
             "kind": "reader",
@@ -215,6 +253,8 @@ def circuit_group_rows(did: str, meta: dict[str, Any]) -> Iterator[Row]:
             "up": None,
             "examples": row.get("n_ex"),
             "mean_effect": _num(row.get("mean_w")),
+            "examples_other_pole": other.get("n_ex"),
+            "mean_effect_other_pole": _num(other.get("mean_w")),
             "description": clean_group_description(g),
         }
 
@@ -234,7 +274,15 @@ def _meta(atlas: Atlas, did: str, remote: bool | None = False) -> dict[str, Any]
 
 
 def _subcircuit_edges(atlas: Atlas, did: str) -> Iterator[Row]:
-    """Edges from the mirrored subcircuit files of a neuron's poles (when it has no circuit file at hand)."""
+    """Edges from the mirrored subcircuit files of a neuron's poles (when it has no circuit file at hand).
+
+    The subcircuit tables store drivers and opposers as magnitudes that push a lane "toward its
+    firing direction" or against it.  For the gate that direction is open (up) on both poles; for
+    the up signal it is the pole's own sign, so up drivers of a negative pole *lower* up.  The
+    values are signed here like the circuit file's (> 0 raises the hub's signal).  A reader's value
+    is signed by the push on the reader's own activation: > 0 raises its positive pole, < 0 its
+    negative pole.  Unit labels in these tables are not tied to a pole.
+    """
     from .tables import subcircuit_link_rows
 
     for p in atlas.catalog.poles_of(did):
@@ -252,7 +300,9 @@ def _subcircuit_edges(atlas: Atlas, did: str) -> Iterator[Row]:
         for row in best.values():
             weight = row["weight"]
             if row["direction"] == "in":
-                signed = weight if row["role"] == "driver" else (-weight if weight is not None else None)
+                # Drivers push the lane towards its firing direction: up for the gate, the pole's sign for up.
+                towards = 1.0 if row["lane"] == "gate" or p.pole == "pos" else -1.0
+                signed = None if weight is None else (weight if row["role"] == "driver" else -weight) * towards
                 yield {
                     "kind": "input", "source": row["unit"], "source_pole": None, "target": did, "target_pole": p.pole,
                     "group": row["subcircuit"], "group_name": "", "role": "drives" if row["role"] == "driver" else "opposes",
@@ -261,10 +311,12 @@ def _subcircuit_edges(atlas: Atlas, did: str) -> Iterator[Row]:
                     "examples_active": None, "label": row["unit_label"] or "",
                 }  # fmt: skip
             else:
+                # The sign is the push on the reader's activation: it names the reader pole that is raised.
+                reader_pole = "pos" if (weight or 0.0) > 0 else ("neg" if (weight or 0.0) < 0 else None)
                 yield {
-                    "kind": "reader", "source": did, "source_pole": p.pole, "target": row["unit"], "target_pole": None,
+                    "kind": "reader", "source": did, "source_pole": p.pole, "target": row["unit"], "target_pole": reader_pole,
                     "group": row["subcircuit"], "group_name": "", "role": None,
-                    "effect": "raised" if (weight or 0) >= 0 else "lowered", "gate": None, "up": None,
+                    "effect": "raised" if reader_pole else None, "gate": None, "up": None,
                     "weight": abs(weight) if weight is not None else None, "layer_distance": None,
                     "examples_active": None, "label": row["unit_label"] or "",
                 }  # fmt: skip
@@ -307,10 +359,14 @@ def neighbourhood(atlas: Atlas, did: str, depth: int = 1, max_nodes: int = 300) 
     Step one is the hub's own circuit (fetched once if the server may fetch).
     Further steps only pass through neighbours that are atlas neurons whose
     circuit files are already mirrored - nothing else is known about the rest.
+
+    When there are more nodes than ``max_nodes``, edges are ranked within their
+    kind (``gate``, ``up``, ``reader``): input weights are attributions and
+    reader weights static couplings, so they are not compared with each other.
     """
     notes: list[str] = []
     catalog = atlas.catalog
-    labels: dict[str, str] = {}
+    labels: dict[str, dict[str | None, str]] = {}
     distance: dict[str, int] = {did: 0}
     collected: list[Row] = []
     frontier = [did]
@@ -327,7 +383,9 @@ def neighbourhood(atlas: Atlas, did: str, depth: int = 1, max_nodes: int = 300) 
             for e in edges:
                 other = e["source"] if e["target"] == hub else e["target"]
                 if e.get("label"):
-                    labels.setdefault(other, e["label"])
+                    # A circuit file labels the neuron-pole a member takes part through; subcircuit tables do not say.
+                    pole = e.get("source_pole") if other == e["source"] else e.get("target_pole")
+                    labels.setdefault(other, {}).setdefault(None if origin == "subcircuit" else pole, e["label"])
                 if other not in distance:
                     distance[other] = step
                     if other in catalog.neurons:
@@ -337,12 +395,19 @@ def neighbourhood(atlas: Atlas, did: str, depth: int = 1, max_nodes: int = 300) 
         if not frontier:
             break
 
-    # Keep the strongest edges until the node budget is used up.
-    collected.sort(key=lambda e: -(e["weight"] or 0.0))
+    # Keep the best-ranked edges of every kind alike until the node budget is used up.
+    by_kind: dict[str, list[Row]] = defaultdict(list)
+    for e in collected:
+        by_kind[e["kind"]].append(e)
+    ranked: list[tuple[float, float, Row]] = []
+    for kind_edges in by_kind.values():
+        kind_edges.sort(key=lambda e: -(e["weight"] or 0.0))
+        ranked.extend((i / len(kind_edges), -(e["weight"] or 0.0), e) for i, e in enumerate(kind_edges))
+    ranked.sort(key=lambda item: (item[0], item[1]))
     keep_nodes: dict[str, None] = {did: None}
     edges_out: list[Row] = []
     dropped = 0
-    for e in collected:
+    for _, _, e in ranked:
         new = [n for n in (e["source"], e["target"]) if n not in keep_nodes]
         if len(keep_nodes) + len(new) > max_nodes:
             dropped += 1
@@ -350,20 +415,24 @@ def neighbourhood(atlas: Atlas, did: str, depth: int = 1, max_nodes: int = 300) 
         keep_nodes.update(dict.fromkeys(new))
         edges_out.append({**e, "weight": round(e["weight"], 6)})
     if dropped:
-        notes.append(f"{dropped:,} weaker edges were left out to stay within {max_nodes} nodes.")
+        notes.append(
+            f"{dropped:,} weaker edges were left out to stay within {max_nodes} nodes; edges were ranked within "
+            "their kind (gate, up, reader), whose weights are different quantities."
+        )
 
     nodes = []
     for node in keep_nodes:
         neuron = catalog.neurons.get(node)
         poles = catalog.poles_of(node)
-        label = labels.get(node, "")
+        label = pole_label(labels.get(node, {}))
         if neuron is not None:
-            label = next((p.headline or p.description for p in poles if p.headline or p.description), "") or neuron.circuit_label or label
+            described = {p.pole: p.headline or p.description for p in poles if p.headline or p.description}
+            label = pole_label(described) or neuron.circuit_label or label
         nodes.append(
             {
                 "id": node,
                 "layer": neuron.layer if neuron else _layer_of(node),
-                "label": label if len(label) <= 300 else label[:300] + " …",
+                "label": label if len(label) <= 320 else label[:300] + " …",  # pole_label stays below 320
                 "in_atlas": bool(poles),
                 "mirrored": atlas.source.store.status(neuron_path("circuit_meta", node)) == PRESENT,
                 "distance": distance.get(node, 0),
@@ -393,6 +462,7 @@ def write_graph(atlas: Atlas, path: Path | str, dids: Iterable[str] | None = Non
         raise ValueError("the graph file must end in .csv, .json or .graphml")
     catalog = atlas.catalog
     nodes: dict[str, dict[str, Any]] = {}
+    labels: dict[str, dict[str | None, str]] = {}
     edges: list[Row] = []
     for e in region_edges(atlas, dids):
         edges.append(e)
@@ -409,12 +479,15 @@ def write_graph(atlas: Atlas, path: Path | str, dids: Iterable[str] | None = Non
                 }
             if node == e["hub"]:
                 nodes[node]["hub"] = True
-            elif e.get("label") and not nodes[node]["label"]:
-                nodes[node]["label"] = e["label"]
+            elif e.get("label"):
+                # The label describes the neuron-pole through which the member takes part.
+                labels.setdefault(node, {}).setdefault(e.get(f"{end}_pole"), e["label"])
     for node, info in nodes.items():
+        described = {}
         if info["in_atlas"]:
-            poles = catalog.poles_of(node)
-            info["label"] = next((p.headline or p.description for p in poles if p.headline or p.description), info["label"])
+            described = {p.pole: p.headline or p.description for p in catalog.poles_of(node) if p.headline or p.description}
+        # Graph files keep whole labels (circuit files cut them at 500 characters per pole).
+        info["label"] = pole_label(described, limit=1200) or pole_label(labels.get(node, {}), limit=1200)
 
     columns = ["hub", "kind", "source", "source_pole", "target", "target_pole", "group", "group_name", "role",
                "effect", "gate", "up", "weight", "layer_distance", "examples_active"]  # fmt: skip
