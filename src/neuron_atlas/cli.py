@@ -506,7 +506,12 @@ def geometry_tables(
     query: Annotated[str | None, typer.Option("--query", "-q", help="Restrict to poles this search finds (default: all mirrored).")] = None,
     fmt: Annotated[str, typer.Option("--format", "-f", help="csv | parquet (needs pyarrow)")] = "csv",
 ) -> None:
-    """Flatten mirrored files into tidy tables: poles, modes, subcircuits, firings, mode similarities, circuit edges."""
+    """Flatten mirrored files into 19 tidy tables (columns and joins: docs/geometry.md).
+
+    poles, modes, subcircuits, subcircuit_links, examples · landscape_modes, landscape_levels,
+    landscape_level_modes, mode_similarity, firings · islands, island_modes, island_examples ·
+    overview, overview_situations, overview_experiments · circuit_groups, circuit_edges, circuit_exemplars
+    """
     from .geometry.tables import write_tables
 
     with _atlas() as atlas:

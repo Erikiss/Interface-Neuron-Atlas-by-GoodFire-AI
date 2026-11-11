@@ -131,15 +131,20 @@ Base URL: {base}
   L30_E47_N449__pos and L30_E47_N449__neg.
 - A pole fires in one or several modes (distinct meanings). Each mode has a label, a share of the
   pole's firings, a description and example passages; the firing token is marked «like this».
-- Categories: mono (single mode), fn (one dominant mode), poly (multiple modes), dark (uninterpretable).
+- Categories: mono (single mode), fn (one dominant mode), poly (multiple modes), dark (uninterpretable),
+  none (not yet read).
 - Full vocabulary: GET {base}/api/v1/glossary
 
 ## How to use the API
 
 1. Search:      GET {base}/api/v1/search?q=braille&limit=10
-   - q takes words, "exact phrases", -exclusions, prefix*, OR, an id, and inline filters:
+   - q takes words, "exact phrases", -exclusions, prefix*, OR / NOT (operators in capitals only), an id,
+     and inline filters written without a space after the colon:
      layer:30 expert:47 pole:neg cat:mono,fn modes:>=3 sim:>0.8 has:overview sample:public
+     in:labels,deep,examples chooses the texts searched (default labels,deep; deep and examples only
+     exist for mirrored poles).
    - match=semantic ranks by meaning instead of exact words; match=substring / regex also exist.
+   - Unknown parameters and malformed filters are refused with HTTP 400 and an explanation.
    - group_by=mode returns one hit per matching mode; group_by=neuron folds both poles.
    - sort=relevance|simulatability|layer|modes|damage|share|random|id, paging with limit and offset.
 2. Read a pole: GET {base}/api/v1/poles/L30_E47_N449__pos?include=modes,examples&max_examples=3
@@ -159,8 +164,9 @@ MCP (Model Context Protocol) endpoint with the same functions as tools: {base}/m
 - `share` is the share of sampled firings; `firing_share` / `damage_share` (include=landscape) are
   weighted to real text and are what the original Overview shows. Do not mix them up.
 - Example passages are raw web text (any language, code, spam, adult content may occur).
-- goodfire.com lists a sample of 3,000 poles; this interface covers all 6,488 published poles
-  (`in_public_sample` tells them apart). The data belongs to Goodfire AI.
+- goodfire.com lists a sample of 3,000 poles; this interface covers every published pole (6,492 in the
+  2026-11-09 release; `in_public_sample` tells them apart). The data belongs to Goodfire AI.
+- MCP answers stay within `max_chars`; when one says it was shortened, ask for less or raise max_chars.
 """
 
 

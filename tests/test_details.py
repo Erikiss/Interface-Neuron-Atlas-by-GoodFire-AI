@@ -94,6 +94,7 @@ def test_island_examples_say_when_their_threshold_differs(atlas, upstream):
     upstream.files[path] = json.dumps(raw).encode()
     d = atlas.pole(fakeatlas.RIVER, ["modes", "examples", "islands"], max_examples=1)
     assert d.islands.islands[0].examples[0].a_rel == 5.0 and d.modes[0].examples[0].a_rel == 9.0
+    assert d.islands.theta == pytest.approx(0.5, rel=0.01) and d.theta == 0.25
     assert any("θ ≈ 0.5" in n and "θ = 0.25" in n for n in d.notes)
     same = atlas.pole(fakeatlas.MIXED, ["modes", "examples", "islands"], max_examples=1)
     assert same.islands.islands[0].examples and not any("θ" in n for n in same.notes)  # one θ: nothing to say

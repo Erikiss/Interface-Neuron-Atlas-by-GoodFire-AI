@@ -396,6 +396,13 @@ class IslandsView(_Model):
     """The older island read of a pole.  Its examples' a_rel use the islands data's own threshold θ (one per
     neuron), not PoleDetail.theta."""
 
+    theta: float | None = Field(
+        None,
+        description=(
+            "The threshold θ the island examples' a_rel are measured against (the circuit data's θ of the "
+            "neuron, recovered from the examples); usually different from PoleDetail.theta."
+        ),
+    )
     modes: list[IslandMode] = Field(default_factory=list)
     islands: list[Island] = Field(default_factory=list)
 

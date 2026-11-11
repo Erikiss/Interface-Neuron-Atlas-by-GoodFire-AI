@@ -97,8 +97,8 @@ _LEGEND_TEXT = (
 _SIDES = (
     ("gate_drivers", "Gate drivers", "earlier neurons that open the gate"),
     ("gate_opposers", "Gate opposers", "earlier neurons that close the gate"),
-    ("up_drivers", "Up drivers", "earlier neurons that raise the value the neuron writes"),
-    ("up_opposers", "Up opposers", "earlier neurons that lower it"),
+    ("up_drivers", "Up drivers", "earlier neurons that push the up signal towards the pole's sign (lower it on a negative pole)"),
+    ("up_opposers", "Up opposers", "earlier neurons that push the up signal the other way"),
     ("readers", "Readers", "later neurons that use this neuron's output"),
 )
 
@@ -1138,9 +1138,9 @@ def _group_tables(inputs: list[dict[str, Any]], readers: list[dict[str, Any]], l
         blocks.append(_Heading(level + 1, "Inputs", anchor="circuit-inputs"))
         blocks.append(
             _note(
-                "Groups of earlier neurons. Gate drivers open the gate and gate opposers close it; up drivers raise "
-                "the value the neuron writes and up opposers lower it. Gate and up: the group's summed contribution "
-                "to each signal."
+                "Groups of earlier neurons. Gate drivers open the gate and gate opposers close it; up drivers push "
+                "the up signal towards the pole's sign (they lower it on a negative pole) and up opposers push it "
+                "the other way. Gate and up: the group's summed contribution to each signal."
             )
         )
         blocks.append(_Table(["Group", "Name", "Role", "Lane", "Gate", "Up", "Share", "Neurons"], rows, "llllrrrr"))

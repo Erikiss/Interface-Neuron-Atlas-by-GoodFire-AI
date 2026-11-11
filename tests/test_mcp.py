@@ -88,6 +88,11 @@ def test_clipping_never_leaves_a_code_fence_open():
         assert clipped.endswith("raise max_chars]")
     longer = "````\ncode with ``` inside\n" + "x\n" * 50
     assert _clip(longer, 60).split("\n\n[…")[0].endswith("````")
+    # Not fences for CommonMark: a backtick in the info string; a "closer" with text after it.
+    fake = "```a`b\n" + "text line\n" * 60
+    assert not _clip(fake, 120).split("\n\n[…")[0].endswith("```")
+    open_ = "```text\n``` not a closer\n" + "line\n" * 60
+    assert _clip(open_, 120).split("\n\n[…")[0].endswith("\n```")
 
 
 def test_batch_similar_info_glossary(client):

@@ -251,6 +251,16 @@ sim     = pd.read_parquet("out/tables/mode_similarity.parquet")  # Modus × Modu
 links   = pd.read_parquet("out/tables/subcircuit_links.parquet") # Neuron → Pol, Pol → Neuron
 ```
 
+`geometry tables` schreibt 19 Tabellen mit festen Spalten und Typen (auch leere Spalten bleiben
+in Parquet numerisch): Pole, Modi, Subcircuits, Verbindungen und Beispiele; Landscape (Modi,
+Stufen, Ähnlichkeiten, einzelne Feuerungen); Islands mit ihren Beispielen; Overview mit
+Situationen und Experimenten; Circuit-Gruppen, -Kanten und -Exemplare. Spalten und Verknüpfungen
+stehen in [`docs/geometry.md`](docs/geometry.md). Wichtig beim Verknüpfen: Die Landscape zählt
+ihre Modi selbst (`landscape_mode_index`, Q3/Q4-Modi einzeln) – die Modusliste eines Pols
+(`mode_index`) nicht; `landscape_modes.pole_mode_index` übersetzt zwischen beiden. Wer Tabellen
+aus einer früheren Version liest: `mode_index` heißt in den Landscape-Tabellen und in `firings`
+jetzt `landscape_mode_index`, in `mode_similarity` `landscape_mode_a`/`landscape_mode_b`.
+
 ## Konfiguration
 
 Alle Einstellungen als Umgebungsvariablen (oder Optionen von `neuron-atlas`):
@@ -325,4 +335,9 @@ pip install -e ".[dev,all]"
 pytest            # offline, synthetische Fixtures
 ruff check src tests
 pytest -m live    # optional: wenige echte Anfragen an den Atlas
+
+# Browser-Test der Oberfläche (Playwright mit Chromium), gegen einen Server im Offline-Modus,
+# der mindestens einen gespiegelten Pol hat; prüft die Seite gegen die Antworten der API
+ATLAS_OFFLINE=1 uvicorn --factory neuron_atlas.api:create_app --port 8765 &
+node tests/e2e/ui_smoke.mjs
 ```

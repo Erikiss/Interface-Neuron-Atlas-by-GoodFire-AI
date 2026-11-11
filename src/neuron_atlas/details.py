@@ -174,7 +174,7 @@ def islands_view(raw: dict[str, Any], max_examples: int = 0, with_tokens: bool =
     Island modes come in file order; grey modes and islands no mode names are merged into one
     unassigned group at the end, as goodfire.com shows them.
     """
-    view = IslandsView()
+    view = IslandsView(theta=island_threshold(raw))
     known: set[int] = set()
     for isl in raw.get("islands") or []:
         iid = _int(isl.get("id"))

@@ -246,7 +246,7 @@ const S = {
   'pole.threshold': ['(Schwelle)', '(threshold)'],
   'pole.thetaTip': ['θ: Aktivierung, ab der dieser Pol typischerweise feuert. Stärken werden als Vielfache von θ angegeben.', 'θ: the activation at which this pole typically starts to fire. Strengths are quoted in multiples of θ.'],
   'pole.simTip': ['Anteil der Wirkung des Neurons, den eine Simulation aus der Beschreibung wiederherstellt (100 % = so gut wie das echte Neuron)', "Share of the neuron's effect that a simulation from the description restores (100% = as good as the real neuron)"],
-  'pole.mainDamageTip': ['Anteil des Schadens, den der Hauptmodus trägt', 'Share of the damage carried by the main mode'],
+  'pole.mainDamageTip': ['Schadensanteil des Hauptmodus (des lesbaren Modus mit den meisten Feuerungen), gezählt über die gesampelten Feuerungen der lesbaren Modi; entscheidet über „fn“ (ab 90 %). Nicht dasselbe wie der Schadensanteil der Landscape.', "Damage share of the main mode (the readable mode with the most firings), over the sampled firings of the readable modes; decides 'fn' (at least 90 %). Not the same as the landscape's damage share."],
   'pole.firingsTip': ['Feuerungen, die für die Subcircuit-Auswertung analysiert wurden', 'Firings analysed for the subcircuit read'],
   'pole.closedShareTip': ['Anteil der Feuerungen mit geschlossenem Gate (Q3/Q4)', 'Share of firings with the gate closed (Q3/Q4)'],
   'pole.otherPole': ['Gegenpol', 'Other pole'],
@@ -374,8 +374,8 @@ const S = {
   'sides.readers': ['Leser', 'Readers'],
   'sides.gateDriversTip': ['Frühere Neuronen, die das Gate öffnen', 'Earlier neurons that open the gate'],
   'sides.gateOpposersTip': ['Frühere Neuronen, die das Gate schließen', 'Earlier neurons that close the gate'],
-  'sides.upDriversTip': ['Frühere Neuronen, die den geschriebenen Wert erhöhen', 'Earlier neurons that raise the written value'],
-  'sides.upOpposersTip': ['Frühere Neuronen, die ihn senken', 'Earlier neurons that lower it'],
+  'sides.upDriversTip': ['Frühere Neuronen, die das Up-Signal in Richtung des Pols schieben (beim negativen Pol also senken)', "Earlier neurons that push the up signal towards the pole's sign (lowering it on a negative pole)"],
+  'sides.upOpposersTip': ['Frühere Neuronen, die das Up-Signal in die Gegenrichtung schieben', 'Earlier neurons that push the up signal the other way'],
   'sides.readersTip': ['Spätere Neuronen, die dieses Neuron lesen', 'Later neurons that read this one'],
 
   // landscape

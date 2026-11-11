@@ -75,7 +75,8 @@ def _message(exc: BaseException) -> str:
     return str(exc) or exc.__class__.__name__
 
 
-_FENCE = re.compile(r"^(`{3,}|~{3,})")
+#: A fence line as CommonMark sees it: up to three spaces, three or more ` or ~, then the rest of the line.
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def _clip(text: str, max_chars: int) -> str:
@@ -96,10 +97,12 @@ def _clip(text: str, max_chars: int) -> str:
         m = _FENCE.match(line)
         if not m:
             continue
-        marker = m.group(1)
+        marker, rest = m.group(1), m.group(2)
         if fence is None:
+            if marker[0] == "`" and "`" in rest:
+                continue  # a backtick in the info string: not a fence for CommonMark
             fence = marker
-        elif marker[0] == fence[0] and len(marker) >= len(fence) and line.strip() == marker:
+        elif marker[0] == fence[0] and len(marker) >= len(fence) and not rest.strip():
             fence = None
     if fence is not None:
         cut += "\n" + fence
@@ -283,7 +286,7 @@ def build_server(atlas: Atlas) -> MCPServer:
         """Search the atlas for poles (one sign of a neuron) by what they respond to.
 
         query: words, "exact phrases", -exclusions, prefix*, OR (in capitals) - or a neuron/pole id.
-          Inline filters (no space after the colon): layer:30 expert:47 pole:neg cat:mono,fn,poly,dark
+          Inline filters (no space after the colon): layer:30 expert:47 pole:neg cat:mono,fn,poly,dark,none
           modes:>=3 sim:>0.8 has:overview sample:public   (sample:public = the 3,000 poles on goodfire.com)
         match: auto (words, then substring) | semantic (rank by meaning) | substring | regex
         group_by: pole | neuron (both poles folded) | mode (one hit per matching mode)
