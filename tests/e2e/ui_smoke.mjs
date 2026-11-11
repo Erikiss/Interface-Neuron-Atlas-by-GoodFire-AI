@@ -1151,7 +1151,12 @@ async function main() {
     await page.setViewportSize({ width: 700, height: 800 });
     await page.goto(`${BASE}/#/pole/${POLE}`);
     await page.waitForSelector('#panel-modes[data-ready="1"]', { timeout: 10000 });
-    await page.evaluate(() => window.scrollTo(0, 1500));
+    // Scroll within the tab area (its section ends before the "similar poles" panel, which follows at this
+    // width and where the bar rightly leaves with its section): the bottom of the area at mid-screen.
+    await page.evaluate(() => {
+      const area = document.querySelector('.pole-main').getBoundingClientRect();
+      window.scrollTo(0, Math.max(0, window.scrollY + area.bottom - window.innerHeight / 2));
+    });
     await page.waitForFunction(() => {
       const tabs = document.querySelector('.tabs').getBoundingClientRect();
       const hit = document.elementFromPoint(tabs.left + 30, tabs.top + tabs.height / 2);
