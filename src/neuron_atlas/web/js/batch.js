@@ -148,7 +148,7 @@ export function mount(container, ctx) {
       let table;
       if (!rows.length) table = h('p', { class: 'muted' }, t('empty.title'));
       else if (last.groupBy === 'mode') {
-        table = h('div', { class: 'table-scroll' }, h('table', { class: 'table table-compact batch-table' },
+        table = h('div', { class: 'table-scroll' }, h('table', { class: 'table table-compact batch-table batch-table-mode' },
           h('thead', null, h('tr', null, h('th', { scope: 'col', class: 'num' }, '#'), h('th', { scope: 'col' }, t('unit.pole')), h('th', { scope: 'col', class: 'num' }, t('group.mode')), h('th', { scope: 'col', class: 'num' }, t('subs.share')), h('th', { scope: 'col' }, t('graph.label')))),
           h('tbody', null, rows.map((m, k) => h('tr', null,
             h('td', { class: 'num muted' }, k + 1),
@@ -157,7 +157,7 @@ export function mount(container, ctx) {
             h('td', { class: 'num' }, fmtPct(m.share)),
             h('td', null, m.label))))));
       } else {
-        table = h('div', { class: 'table-scroll' }, h('table', { class: 'table table-compact batch-table' },
+        table = h('div', { class: 'table-scroll' }, h('table', { class: 'table table-compact batch-table batch-table-pole' },
           h('thead', null, h('tr', null, h('th', { scope: 'col', class: 'num' }, '#'), h('th', { scope: 'col' }, t('unit.pole')), h('th', { scope: 'col' }, t('filters.category')), h('th', { scope: 'col', class: 'num' }, t('pole.modes')), h('th', { scope: 'col' }, t('batch.text')))),
           h('tbody', null, rows.map((hit, k) => {
             const b = bestText(hit);

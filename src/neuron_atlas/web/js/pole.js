@@ -1,7 +1,7 @@
 // The pole page: header, six lazily loaded tabs, similar poles, copy / download / print.
 
 import { api, apiUrl, isAbort } from './api.js';
-import { h, icon, replace, clear, skeleton, bar, fmtInt, fmtNum, fmtPct, fmtSig, displayId, didOf, poleLabel, signChar, clampText, checkClamps } from './dom.js';
+import { h, icon, replace, skeleton, bar, fmtInt, fmtNum, fmtPct, fmtSig, displayId, didOf, poleLabel, signChar, clampText, checkClamps } from './dom.js';
 import { t } from './i18n.js';
 import { notice, errorBox, copyButton, popover, toast, segmented } from './ui.js';
 import { buildHash, poleHash, neuronHash } from './state.js';
@@ -265,7 +265,7 @@ export function mount(container, ctx) {
       h('div', { class: 'pole-links no-print' },
         h('a', { class: 'btn btn-small', href: poleHash(other, { tab: tab === 'modes' ? null : tab }) }, h('span', { class: `sign sign-${p.pole === 'pos' ? 'neg' : 'pos'}` }, signChar(p.pole === 'pos' ? 'neg' : 'pos')), t('pole.otherPole')),
         h('a', { class: 'btn btn-small', href: neuronHash(p.did) }, icon('graph', 15), t('pole.neuronView')),
-        p.atlas_url ? h('a', { class: 'btn btn-small', href: p.atlas_url, target: '_blank', rel: 'noopener noreferrer' }, icon('external', 15), t('pole.openOriginal')) : h('span', { class: 'muted small', title: t('pole.notOnGoodfireTip') }, t('pole.notOnGoodfire'))));
+        /^https:\/\//i.test(p.atlas_url || '') ? h('a', { class: 'btn btn-small', href: p.atlas_url, target: '_blank', rel: 'noopener noreferrer', dataset: { original: '1' } }, icon('external', 15), t('pole.openOriginal')) : h('span', { class: 'muted small', title: t('pole.notOnGoodfireTip') }, t('pole.notOnGoodfire'))));
     checkClamps(head);
     // which tabs have data
     for (const name of TABS) {
@@ -291,8 +291,24 @@ export function mount(container, ctx) {
     return { include: includeList(format), max_examples: maxExamples, format };
   }
 
+  // The action bar is built once; changing the scope only rewrites its links (so an
+  // open scope popover keeps its button).
+  let syncActions = () => {};
   function renderActions() {
-    const scopeBtn = h('button', { type: 'button', class: 'btn', 'aria-label': t('export.scope') }, icon('sliders', 15), h('span', null, t('export.scope')), h('span', { class: 'count' }, String(includeList('md').length)));
+    const url = (format) => apiUrl(`/api/v1/poles/${encodeURIComponent(pid)}`, exportParams(format));
+    const countEl = h('span', { class: 'count' });
+    const scopeBtn = h('button', { type: 'button', class: 'btn', 'aria-label': t('export.scope') }, icon('sliders', 15), h('span', null, t('export.scope')), countEl);
+    const mdLink = h('a', { class: 'btn', download: `${pid}.md` }, icon('download', 15), '.md');
+    const jsonLink = h('a', { class: 'btn', download: `${pid}.json` }, icon('download', 15), '.json');
+    const printLink = h('a', { class: 'btn', target: '_blank', rel: 'noopener', title: t('export.printPageTip') }, icon('print', 15), t('export.printPage'));
+    const hint = h('span', { class: 'muted small actions-hint' });
+    syncActions = () => {
+      countEl.textContent = String(includeList('md').length);
+      mdLink.href = url('md');
+      jsonLink.href = url('json');
+      printLink.href = apiUrl(`/p/${encodeURIComponent(pid)}`, { include: includeList('html'), max_examples: maxExamples });
+      hint.textContent = t('export.scopeNow', { parts: includeList('md').map((p) => t(`part.${p}`)).join(', '), n: maxExamples });
+    };
     popover(scopeBtn, (panel) => {
       panel.append(h('h3', null, t('export.scopeTitle')), h('p', { class: 'muted small' }, t('export.scopeHint')));
       const list = h('div', { class: 'stack-tight' });
@@ -301,7 +317,7 @@ export function mount(container, ctx) {
         input.addEventListener('change', () => {
           scope.parts = EXPORT_PARTS.filter((x) => (x === part ? input.checked : scope.parts.includes(x)));
           saveParts(scope);
-          renderActions();
+          syncActions();
         });
         list.appendChild(h('label', { class: 'check' }, input, h('span', null, t(`part.${part}`))));
       }
@@ -309,24 +325,21 @@ export function mount(container, ctx) {
       tok.addEventListener('change', () => {
         scope.tokens = tok.checked;
         saveParts(scope);
-        renderActions();
+        syncActions();
       });
       list.appendChild(h('label', { class: 'check' }, tok, h('span', null, t('part.tokens'))));
       panel.append(list, examplesSelect());
     }, { cls: 'popover-scope' });
 
-    const printBtn = h('button', { type: 'button', class: 'btn' }, icon('print', 15), t('export.printThis'));
+    const printBtn = h('button', { type: 'button', class: 'btn', dataset: { action: 'print-view' } }, icon('print', 15), t('export.printThis'));
     printBtn.addEventListener('click', () => printScope(printBtn));
 
     replace(actions,
       h('div', { class: 'btn-group', role: 'group', 'aria-label': t('export.title') },
         copyButton(t('export.copyMd'), () => api(`/api/v1/poles/${encodeURIComponent(pid)}`, { params: exportParams('md'), as: 'text' })),
-        h('a', { class: 'btn', href: apiUrl(`/api/v1/poles/${encodeURIComponent(pid)}`, exportParams('md')), download: `${pid}.md` }, icon('download', 15), '.md'),
-        h('a', { class: 'btn', href: apiUrl(`/api/v1/poles/${encodeURIComponent(pid)}`, exportParams('json')), download: `${pid}.json` }, icon('download', 15), '.json'),
-        h('a', { class: 'btn', href: apiUrl(`/p/${encodeURIComponent(pid)}`, { include: includeList('html'), max_examples: maxExamples }), target: '_blank', rel: 'noopener', title: t('export.printPageTip') }, icon('print', 15), t('export.printPage')),
-        printBtn,
-        scopeBtn),
-      h('span', { class: 'muted small actions-hint' }, t('export.scopeNow', { parts: includeList('md').map((p) => t(`part.${p}`)).join(', '), n: maxExamples })));
+        mdLink, jsonLink, printLink, printBtn, scopeBtn),
+      hint);
+    syncActions();
   }
 
   function examplesSelect() {
@@ -334,7 +347,7 @@ export function mount(container, ctx) {
     sel.addEventListener('change', () => {
       maxExamples = Number(sel.value);
       ctx.go(hashFor(), { replace: true, silent: true });
-      renderActions();
+      syncActions();
       for (const name of TABS) panelEls[name].dataset.key = '';
       showTab(tab);
     });
@@ -458,7 +471,7 @@ export function mount(container, ctx) {
         loadSimilar();
         similarBox.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       });
-      list.appendChild(h('article', { class: `mode mode-${m.kind}`, id: `mode-${m.index}` },
+      list.appendChild(h('article', { class: `mode mode-${m.kind} ${m.examples && m.examples.length ? 'has-examples' : ''}`.trim(), id: `mode-${m.index}` },
         h('header', { class: 'mode-head' },
           h('div', { class: 'mode-title' },
             h('span', { class: 'mode-index' }, t('mode.index', { n: m.index })),
@@ -611,7 +624,7 @@ export function mount(container, ctx) {
     for (const s of subs) {
       const dmg = s.damage || {};
       const facts = (label, text) => (text ? [h('dt', null, label), h('dd', null, text)] : null);
-      list.appendChild(h('article', { class: 'sub', id: `sub-${s.id}` },
+      list.appendChild(h('article', { class: `sub ${s.examples && s.examples.length ? 'has-examples' : ''}`.trim(), id: `sub-${s.id}` },
         h('header', { class: 'mode-head' },
           h('div', { class: 'mode-title' },
             h('span', { class: 'mode-index mono' }, s.id),

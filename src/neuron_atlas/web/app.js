@@ -88,6 +88,8 @@ function route() {
   main.dataset.view = r.name;
   current = { name: r.name, view: null };
   if (changing && r.name !== 'search') window.scrollTo(0, 0);
+  // keep keyboard and screen-reader focus inside the new view
+  if (changing && !document.querySelector('dialog[open]')) main.focus({ preventScroll: true });
   try {
     current.view = VIEWS[r.name].mount(main, ctx);
   } catch (err) {
@@ -184,6 +186,22 @@ function wireKeys() {
   });
 }
 
+/** Printing shows everything: collapsed <details> are opened for the print and closed again afterwards. */
+function wirePrint() {
+  window.addEventListener('beforeprint', () => {
+    for (const d of document.querySelectorAll('main details:not([open])')) {
+      d.dataset.printOpened = '1';
+      d.open = true;
+    }
+  });
+  window.addEventListener('afterprint', () => {
+    for (const d of document.querySelectorAll('main details[data-print-opened]')) {
+      d.open = false;
+      delete d.dataset.printOpened;
+    }
+  });
+}
+
 // --------------------------------------------------------------------------- start
 
 configure({
@@ -194,6 +212,7 @@ configure({
 initTooltips();
 wireChrome();
 wireKeys();
+wirePrint();
 renderChrome();
 window.addEventListener('hashchange', route);
 route();

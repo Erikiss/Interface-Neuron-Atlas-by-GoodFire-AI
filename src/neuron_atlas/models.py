@@ -127,7 +127,9 @@ class PoleHit(_Model):
     pid: str
     did: str
     pole: Pole
-    display: str = Field(description="Human form of the id, e.g. '+ L30/E47/N449'.")
+    display: str = Field(
+        description="Human form of the id, e.g. '+ L30/E47/N449'; the negative pole is written with a minus sign (U+2212)."
+    )
     layer: int
     expert: int | None
     neuron: int
@@ -209,7 +211,7 @@ Include = Literal[
 class Example(_Model):
     """One passage the pole fires on, as plain text with the firing token marked «like this»."""
 
-    source: str = Field(description="Data set the example comes from: subcircuit, islands, overview, landscape, circuit.")
+    source: str = Field(description="Data set the example comes from: subcircuit or islands.")
     ref: str | None = Field(None, description="Subcircuit / island / example id inside the pole.")
     group: str | None = Field(None, description="Sampling role: strongest, typical, weakest, random, …")
     act: float | None = Field(None, description="Peak activation of the neuron in this passage (signed).")
@@ -224,7 +226,22 @@ class Example(_Model):
     focal_token: str | None = None
     focal_index: int | None = None
     tokens: list[tuple[str, float | None]] | None = Field(
-        None, description="[token text, activation] pairs; only with include=tokens."
+        None,
+        description=(
+            "[token text, activation] pairs; only with include=tokens. Values keep the neuron's own sign "
+            "(a negative pole fires with negative values); null means the token was not routed to this "
+            "neuron's expert. See token_unit for the scale."
+        ),
+    )
+    token_unit: Literal["theta", "raw"] | None = Field(
+        None,
+        description=(
+            "Scale of the token values: 'theta' = multiples of the pole's threshold θ (subcircuit examples), "
+            "'raw' = raw activations (island examples)."
+        ),
+    )
+    window: tuple[int, int] | None = Field(
+        None, description="Token indices [start, end) that `text` covers (island examples show a window of a longer passage)."
     )
 
 
@@ -254,10 +271,14 @@ class CircuitSides(_Model):
 
 
 class Damage(_Model):
-    """How much switching the neuron off on these firings changes the model's next-token predictions."""
+    """How much switching the neuron off on these firings changes the model's next-token predictions.
 
-    per_firing: float | None = Field(None, description="KL divergence (nats) per firing.")
-    ratio: float | None = Field(None, description="Relative to the pole's average firing; 1 = typical.")
+    These are averages over the *sampled* firings (the Modes tab of the explorer).  The Overview's
+    "damage per firing", weighted to how often firings occur in real text, is in ``landscape.modes``.
+    """
+
+    per_firing: float | None = Field(None, description="KL divergence (nats) per sampled firing.")
+    ratio: float | None = Field(None, description="Relative to the pole's average sampled firing; 1 = typical.")
     n_measured: int | None = None
 
 
@@ -301,10 +322,16 @@ class Mode(_Model):
     label: str
     public_label: str = Field(description="Label as shown on goodfire.com (special modes are renamed there).")
     kind: Literal["open", "closed_gate", "residue"] = Field(
-        description="open: a readable mode · closed_gate: firings through the gate's weak leak (Q3/Q4) · residue: unassigned"
+        description=(
+            "open: a readable mode · closed_gate: all subcircuits that fire mostly through the gate's weak leak "
+            "(Q3/Q4), lumped together · residue: subcircuits set aside as unreadable. (The landscape regroups the "
+            "last two into several Q3/Q4 modes plus one 'unassigned' bucket, so only open modes line up.)"
+        )
     )
     description: str = ""
-    share: float | None = Field(None, description="Share of the pole's firings (0..1).")
+    share: float | None = Field(
+        None, description="Share of the pole's sampled firings (0..1); see landscape.modes[].firing_share for real-text weighting."
+    )
     n_firings: int | None = None
     subcircuits: list[str] = Field(default_factory=list)
     damage: Damage | None = None
@@ -354,7 +381,10 @@ class PoleDetail(_Model):
     research: dict[str, Any] | None = None
     sources: dict[str, str] = Field(
         default_factory=dict,
-        description="Per data set: used, not_requested, not_mirrored, absent (does not exist upstream).",
+        description=(
+            "Per data set: used, not_requested, not_mirrored, absent (does not exist upstream), "
+            "or 'error: …' when it could not be read."
+        ),
     )
     notes: list[str] = Field(default_factory=list)
 
@@ -369,7 +399,10 @@ class NeuronDetail(_Model):
     circuit_label: str = ""
     circuit_summary: dict[str, Any] | None = None
     poles: list[PoleHit] = Field(default_factory=list)
-    circuit: dict[str, Any] | None = None
+    circuit: dict[str, Any] | None = Field(None, description="Circuit of the positive pole (see `circuits` for both).")
+    circuits: dict[str, dict[str, Any]] | None = Field(
+        None, description="With include=circuit: the circuit of each pole, keyed 'pos' and 'neg'."
+    )
     notes: list[str] = Field(default_factory=list)
 
 

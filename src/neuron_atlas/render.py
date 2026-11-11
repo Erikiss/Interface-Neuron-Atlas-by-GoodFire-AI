@@ -1120,7 +1120,9 @@ def _group_blocks(group: dict[str, Any], reader: bool) -> list[_Block]:
     return blocks
 
 
-def _circuit_blocks(circuit: Any, pole: str = "pos", level: int = 1) -> list[_Block]:
+def _circuit_blocks(
+    circuit: Any, pole: str = "pos", level: int = 1, *, title: str = "Circuit", anchor: str = "circuit"
+) -> list[_Block]:
     """The Circuit view: who drives the neuron, who reads it, which output tokens it moves."""
     view = _dict(circuit)
     inputs, readers = _dicts(view.get("inputs")), _dicts(view.get("readers"))
@@ -1129,7 +1131,7 @@ def _circuit_blocks(circuit: Any, pole: str = "pos", level: int = 1) -> list[_Bl
     notes = [_flat(n) for n in _list(view.get("notes")) if _flat(n)]
     if not (inputs or readers or tokens or contexts or notes or _flat(view.get("line"))):
         return []
-    blocks: list[_Block] = [_Heading(level, "Circuit", anchor="circuit")]
+    blocks: list[_Block] = [_Heading(level, title, anchor=anchor)]
     blocks += _prose(view.get("line"))
     facts = []
     if _number(view.get("examples_analysed")) is not None:
@@ -2066,7 +2068,15 @@ def neuron_markdown(detail: NeuronDetail) -> str:
         blocks.append(_para("No pole of this neuron has been read in this release."))
     for hit in detail.poles:
         blocks += _hit_blocks(hit, 1)
-    blocks += _circuit_blocks(detail.circuit, _str(_dict(detail.circuit).get("pole")) or "pos")
+    circuits = _dict(detail.circuits)
+    if circuits:
+        # The two poles have different inputs, readers and output tokens: show each.
+        for pole, words in (("pos", "positive"), ("neg", "negative")):
+            blocks += _circuit_blocks(
+                circuits.get(pole), pole, title=f"Circuit of the {words} pole", anchor=f"circuit-{pole}"
+            )
+    else:
+        blocks += _circuit_blocks(detail.circuit, _str(_dict(detail.circuit).get("pole")) or "pos")
     blocks += _notes(detail.notes)
     blocks.append(_footer(next((hit.atlas_url for hit in detail.poles if hit.atlas_url), None)))
     return _to_markdown(blocks)

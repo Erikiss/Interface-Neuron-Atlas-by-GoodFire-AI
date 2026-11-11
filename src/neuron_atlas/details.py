@@ -29,6 +29,7 @@ from .models import (
 )
 from .search import SCOPE_DEEP, SCOPE_EXAMPLES, SearchIndex, TextField, pole_hit
 from .upstream import AtlasError, AtlasSource, NotMirrored, neuron_path, pole_path
+from .views import circuit_view, landscape_view, overview_texts, overview_view
 
 ALL_INCLUDES = ("modes", "subcircuits", "examples", "islands", "overview", "landscape", "circuit", "tokens", "research")
 DEFAULT_INCLUDES = ("modes", "examples")
@@ -231,21 +232,25 @@ class Details:
         if "overview" in inc:
             ov = self._load("overview", pole_path("overview", pid), p.has_overview, sources, remote)
             if isinstance(ov, dict):
-                detail.overview = self._overview_view(ov, max_examples if with_examples else 0, with_tokens, "research" in inc)
+                detail.overview = overview_view(ov, research="research" in inc)
         else:
             sources["overview"] = "not_requested" if p.has_overview else "absent"
 
         if "landscape" in inc:
             ls = self._load("landscape", pole_path("landscape", pid), p.has_landscape, sources, remote)
             if isinstance(ls, dict):
-                detail.landscape = self._landscape_view(ls)
+                detail.landscape = landscape_view(ls)
+                # Only open modes exist in both index spaces; they are matched by their label.
+                by_label = {m.label: m.index for m in p.modes}
+                for mode in detail.landscape["modes"]:
+                    mode["pole_mode_index"] = by_label.get(mode["label"]) if mode["kind"] == "open" else None
         else:
             sources["landscape"] = "not_requested" if p.has_landscape else "absent"
 
         if "circuit" in inc:
             meta = self._load("circuit", neuron_path("circuit_meta", p.did), p.has_circuit, sources, remote)
             if isinstance(meta, dict):
-                detail.circuit = self._circuit_view(meta, p.pole)
+                detail.circuit = circuit_view(meta, p.pole, self.catalog)
         else:
             sources["circuit"] = "not_requested" if p.has_circuit else "absent"
 
@@ -275,6 +280,8 @@ class Details:
             focal_token=focal_token,
             focal_index=focal,
             tokens=_token_pairs(tokens[:end]) if with_tokens else None,
+            token_unit="theta",
+            window=(0, end),
         )
 
     def _subcircuit_examples(self, raw: dict[str, Any], sid: str, limit: int, with_tokens: bool) -> list[Example]:
@@ -422,6 +429,8 @@ class Details:
             focal_token=str(tokens[focal][0]) if focal is not None and 0 <= focal < len(tokens) else None,
             focal_index=focal,
             tokens=_token_pairs(tokens) if with_tokens else None,
+            token_unit="raw",
+            window=(lo, hi),
         )
 
     def _islands_view(self, raw: dict[str, Any], max_examples: int, with_tokens: bool) -> IslandsView:
@@ -475,23 +484,6 @@ class Details:
             view.modes.append(unassigned)
         return view
 
-    # ------------------------------------------------------------------ other tabs (filled in below)
-
-    def _overview_view(self, raw: dict[str, Any], max_examples: int, with_tokens: bool, research: bool) -> dict[str, Any]:
-        from .views import overview_view
-
-        return overview_view(raw, max_examples, with_tokens, research)
-
-    def _landscape_view(self, raw: dict[str, Any]) -> dict[str, Any]:
-        from .views import landscape_view
-
-        return landscape_view(raw)
-
-    def _circuit_view(self, meta: dict[str, Any], pole: str) -> dict[str, Any]:
-        from .views import circuit_view
-
-        return circuit_view(meta, pole, self.catalog)
-
     # ------------------------------------------------------------------ neuron
 
     def neuron(
@@ -522,7 +514,8 @@ class Details:
                     meta = None
                     detail.notes.append("Circuit data is not mirrored and remote fetching is disabled.")
                 if isinstance(meta, dict):
-                    detail.circuit = self._circuit_view(meta, "pos")
+                    detail.circuits = {pole: circuit_view(meta, pole, self.catalog) for pole in ("pos", "neg")}
+                    detail.circuit = detail.circuits["pos"]
         return detail
 
     # ------------------------------------------------------------------ deep search texts
@@ -571,8 +564,6 @@ class Details:
                     if text:
                         yield TextField("example", text, ref=f"{ref}:{slot}", scope=SCOPE_EXAMPLES)
         elif kind == "overview":
-            from .views import overview_texts
-
             yield from overview_texts(raw)
 
     def index_deep(self, pid: str, *, examples: bool = False) -> int:

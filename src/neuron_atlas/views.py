@@ -8,6 +8,7 @@ clouds, incidence matrices) are summarised here; the geometry tools and the
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -29,6 +30,11 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _is_hex_colour(value: Any) -> bool:
+    """Upstream colours end up in style attributes of pages; accept nothing but #rgb / #rrggbb."""
+    return isinstance(value, str) and re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})", value) is not None
+
+
 # --------------------------------------------------------------------------- overview
 
 
@@ -38,7 +44,7 @@ def situation_unit(raw: dict[str, Any]) -> str:
     return "subcircuit" if unit == "island" else "mode"
 
 
-def overview_view(raw: dict[str, Any], max_examples: int = 0, with_tokens: bool = False, research: bool = False) -> dict[str, Any]:
+def overview_view(raw: dict[str, Any], research: bool = False) -> dict[str, Any]:
     """The written explanation of a pole (the "neuron scientist" page).
 
     Keys: ``headline`` and ``summary`` in plain language; ``situations`` (one
@@ -272,7 +278,7 @@ def landscape_view(raw: dict[str, Any], *, matrices: bool = True) -> dict[str, A
             "kind": kind,
             "sample_share": _num(m.get("share")),
             **nums,
-            "colour": colours[k] if k < len(colours) and isinstance(colours[k], str) else None,
+            "colour": colours[k] if k < len(colours) and _is_hex_colour(colours[k]) else None,
         }
         if kind == "closed_gate":
             item["relation"] = {
@@ -350,6 +356,22 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
     neurons this pole ``raised`` or ``lowered``, with the number of examples in
     which that showed.  ``output_tokens`` are the vocabulary tokens whose
     logits the neuron pushes most on this pole.
+
+    Shape::
+
+        {"neuron", "pole", "line", "examples_analysed", "threshold", "notes": [...],
+         "inputs":  [{"id", "name", "description", "role": "drives"|"opposes", "lane" (upstream's tag, e.g.
+                      "gate + / up −"), "gate", "up" (summed signed contributions), "effect" (upstream's net
+                      sign of the two), "share", "about": [{"name", "description", "n"}], "n_members",
+                      "members": [{"unit", "pole", "label", "in_atlas", "gate", "up",
+                                   "weight" (the larger of gate/up by magnitude), "weight_lane"}]}],
+         "readers": [{"id", "name", "description", "effect": "+"|"-", "examples", "mean_effect",
+                      "measured_direction" (only when the measurement contradicts the label), "n_members",
+                      "members": [{"unit", "pole", "label", "in_atlas", "weight" (magnitude), "layers_ahead"}]}],
+         "output_tokens": [{"token", "weight"}],
+         "strongest_contexts": [{"text" (firing token marked «…»), "activation" (raw)}]}
+
+    The threshold here is the circuit data's own θ (one per neuron), not the pole's θ of the mode data.
     """
     from .geometry.graph import (
         clean_group_description,
@@ -384,8 +406,9 @@ def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, member
         else:
             gate, up = _num(m.get("gate_s")), _num(m.get("up_s"))
             out["gate"], out["up"] = gate, up
-            # One number for compact listings: the lane on which the unit weighs most.
-            out["weight"] = max((v for v in (gate, up) if v is not None), key=abs, default=None)
+            # One number for compact listings: the lane on which the unit weighs most (and which lane that is).
+            lanes = [(v, name) for v, name in ((gate, "gate"), (up, "up")) if v is not None]
+            out["weight"], out["weight_lane"] = max(lanes, key=lambda x: abs(x[0]), default=(None, None))
         return out
 
     share = {str(i.get("id")): _num(i.get("mass_share")) for i in side.get("inputs") or [] if isinstance(i, dict)}

@@ -48,7 +48,11 @@ GLOSSARY: dict[str, Any] = {
             "rest is estimated from strength and mode."
         ),
         "damage_share": "Share of the pole's total damage carried by a mode, weighted to real-text frequency.",
-        "damage_per_firing": "Damage of one firing of the mode relative to the pole's average firing (1 = typical).",
+        "damage_per_firing": (
+            "Damage of one firing of the mode relative to the pole's average firing (1 = typical), weighted to "
+            "real-text frequency (landscape / Overview). The Modes tab shows the same idea over the sampled "
+            "firings instead (`damage.ratio` of a mode); the two numbers differ, often by a lot."
+        ),
         "main_damage_share": "Share of the damage carried by the pole's main mode.",
         "category": {
             "mono": "single mode - “Everything this pole fires on fits one specific meaning.”",

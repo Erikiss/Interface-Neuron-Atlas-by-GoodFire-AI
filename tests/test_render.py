@@ -139,7 +139,7 @@ LANDSCAPE = {
     "sampled_firings": 5000,
     "modes": [
         {"index": 0, "label": "Kettle words", "description": "Kettles.", "kind": "open", "sample_share": 0.62,
-         "firing_share": 0.078, "damage_share": 0.62, "damage_per_firing": 7.9, "tested_firings": 72, "colour": "#008b85"},
+         "firing_share": 0.078, "damage_share": 0.62, "damage_per_firing": 7.9, "tested_firings": 72, "colour": "#1a7f6b"},
         {"index": 1, "label": "Lids | rims", "description": "Lids seen through the leak.", "kind": "closed_gate",
          "sample_share": 0.2, "firing_share": 0.9, "damage_share": 0.3, "damage_per_firing": 0.33, "tested_firings": 4,
          "colour": "javascript:alert(1)", "relation": {"kind": "SUBCASE", "to_mode": 0, "text": "A narrower case of “Kettle words”"}},
@@ -151,14 +151,14 @@ LANDSCAPE = {
         {"index": 0, "name": "Top 5%", "median_strength": 0.5, "min_strength": 0.3, "max_strength": 0.7,
          "token_frequency": 0.04, "one_in_tokens": 25, "sampled_firings": 1000,
          "firings_by_mode": [100, 800, 100], "damage_by_mode": [0.5, 0.25, 0.25]},
-        {"index": 4, "name": "Strongest 1,000", "median_strength": 5.9, "min_strength": 3.4, "max_strength": 14.7,
-         "token_frequency": 0.000007, "one_in_tokens": 142896, "sampled_firings": 1000,
+        {"index": 4, "name": "Strongest 1,000", "median_strength": 5.9, "min_strength": 3.4, "max_strength": 12.5,
+         "token_frequency": 0.0000081, "one_in_tokens": 123456, "sampled_firings": 1000,
          "firings_by_mode": [1000, 0, 0], "damage_by_mode": [2.0, 0.0, 0.0]},
     ],
-    "damage_fit": {"slope": 2.28, "r2": 0.56, "tested_firings": 187, "note": "ignored"},
+    "damage_fit": {"slope": 2.5, "r2": 0.75, "tested_firings": 150, "note": "ignored"},
     "mode_order": [1, 0],
-    "firings_listed": 937,
-    "gate_closed_firings_listed": 161,
+    "firings_listed": 800,
+    "gate_closed_firings_listed": 120,
     "strength_unit": "multiples of the pole's firing threshold θ",
     "mode_similarity": {"by_description": [[1.0, 0.25], [0.25, 1.0]], "by_firing": None, "note": "ignored"},
 }  # fmt: skip
@@ -219,7 +219,7 @@ def make_detail(pole: str = "pos") -> PoleDetail:
     )  # fmt: skip
     return PoleDetail(
         pole=make_hit(pole),
-        theta=0.3192,
+        theta=0.4321,
         n_firings=5000,
         closed_gate_share=0.36,
         auto_label="Automatic: kettles.",
@@ -279,7 +279,7 @@ def test_numbers_in_a_document():
     assert "90% of firings · 30% of damage · 0.3× average damage per firing · rough: 4 tested firings" in md
     assert "damage per firing 7.9× the pole's average" in md and "damage per firing 11× the pole's average" in md
     assert "| <0.1% |" in md  # the residue mode's share in the table
-    assert "simulatability 61%" in md and "main mode carries 93% of the damage" in md and "θ = 0.3192" in md
+    assert "simulatability 61%" in md and "main mode carries 93% of the damage" in md and "θ = 0.4321" in md
     assert "simulatability < −100%" in render.hit_markdown(make_hit(simulatability=-24.7))
     assert "simulatability -5%" in render.hit_markdown(make_hit(simulatability=-0.05))
 
@@ -314,7 +314,7 @@ def test_every_section_appears_in_order_when_its_data_is_present():
     for text in (
         "**Summary.** Mostly kettles.", "**Unified description.**", "**Automatic label of the whole neuron.**",
         "### Mode 0 — Kettle words", "### Mode 1 — Q3/Q4 firings (gate input negative)", "Closed-gate firings (Q3/Q4)",
-        "Label in the data: “Closed-gate firings (silu leak)”", "### The five rarity levels", "1 in 142,896 tokens",
+        "Label in the data: “Closed-gate firings (silu leak)”", "### The five rarity levels", "1 in 123,456 tokens",
         "### Situations (one per mode)", "### What does not make it fire", "### Agent experiments",
         "### How well the description predicts the neuron", "### Still open", "### The scientist's final description",
         "### The scientist's full report", "### Subcircuit c0 — Kettle on the stove", "belongs to mode 0 (Kettle words)",
@@ -628,11 +628,11 @@ def test_html_is_a_standalone_printable_page():
                  "@media print", ".noprint{display:none!important}", "serif"):  # fmt: skip
         assert rule in html, rule
     assert '<button type="button" onclick="print()">Print</button>' in html and 'class="bar noprint"' in html
-    assert '<table class="facts">' in html and "<th>Firing threshold θ</th><td>0.3192</td>" in html
+    assert '<table class="facts">' in html and "<th>Firing threshold θ</th><td>0.4321</td>" in html
     assert '<span class="meter"><i style="width:62.0%"></i></span>62%' in html  # share bars, pure CSS
     assert '<aside class="legend">' in html and "the opposite sign" in html
     assert "<th>Claim</th><th>Test</th><th>Result</th>" in html and "<td>Kettle | not pot</td>" in html
-    assert '<i class="sw" style="background:#008b85;border-color:#008b85"></i>' in html and "javascript:" not in html
+    assert '<i class="sw" style="background:#1a7f6b;border-color:#1a7f6b"></i>' in html and "javascript:" not in html
     assert '<span class="tag">most damage</span>' in html and '<span class="tag">Q3/Q4</span>' in html
     assert f'Source: Qwen3.6 Neuron Atlas by Goodfire, <a href="{URL.replace("&", "&amp;")}">' in html
     assert html.count("<section") == html.count("</section>") and html.count("<table") == html.count("</table>")

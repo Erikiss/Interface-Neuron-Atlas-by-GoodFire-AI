@@ -4,7 +4,7 @@ import { api, apiUrl, isAbort } from './api.js';
 import { h, icon, replace, clear, skeleton, bar, fmtInt, fmtNum, fmtPct, displayId, makeHighlighter, clampText, checkClamps, debounce } from './dom.js';
 import { t } from './i18n.js';
 import { notice, errorBox, popover, segmented, toast } from './ui.js';
-import { CATEGORIES, FEATURES, MATCH_MODES, SCOPES, SORTS, GROUPS, SAMPLES, defaultState, stateFromParams, stateToParams, filterParams, stateKey, hasFilters, buildHash, poleHash, neuronHash } from './state.js';
+import { CATEGORIES, FEATURES, MATCH_MODES, SCOPES, SORTS, GROUPS, SAMPLES, defaultState, stateFromParams, stateToParams, stateToQuery, filterParams, stateKey, hasFilters, buildHash, poleHash, neuronHash } from './state.js';
 import { catBadge, sampleBadge, mirrorBadge, poleLink } from './parts.js';
 
 const PAGE = 25;
@@ -79,8 +79,8 @@ export function mount(container, ctx) {
     h('div', { class: 'opt' }, h('span', { class: 'opt-label' }, t('search.match')), matchSeg),
     h('div', { class: 'opt' }, h('span', { class: 'opt-label' }, t('search.scope')), scopeBox),
     h('div', { class: 'opt' }, h('span', { class: 'opt-label' }, t('search.groupBy')), groupSeg),
-    h('div', { class: 'opt' }, h('span', { class: 'opt-label' }, t('search.sort')), h('span', { class: 'opt-pair' }, sortSel, orderSel)),
     filterToggle);
+  const sortBox = h('div', { class: 'opt sort-opt' }, h('span', { class: 'opt-label' }, t('search.sort')), h('span', { class: 'opt-pair' }, sortSel, orderSel));
 
   // ---- filters
   const filterBox = h('aside', { class: 'filters', id: 'filters', 'aria-label': t('filters.title') });
@@ -161,7 +161,7 @@ export function mount(container, ctx) {
   const list = h('div', { class: 'hits', role: 'list' });
   const foot = h('div', { class: 'results-foot' });
   const resultsBox = h('section', { class: 'results', 'aria-label': t('search.results') },
-    h('div', { class: 'results-head' }, summary, tools), chips, notes, list, foot);
+    h('div', { class: 'results-head' }, summary, sortBox, tools), chips, notes, list, foot);
 
   const root = h('div', { class: 'search-view' }, searchbar, options, h('div', { class: 'search-layout' }, filterBox, resultsBox));
   container.appendChild(root);
@@ -410,7 +410,7 @@ export function mount(container, ctx) {
         catBadge(hit.category, hit.category_words),
         metaBits(hit),
         h('span', { class: 'hit-badges' }, sampleBadge(hit), mirrorBadge(hit))),
-      showHeadline ? h('p', { class: 'hit-headline' }, highlight(hit.headline)) : null,
+      showHeadline ? h('p', { class: 'hit-headline' }, h('a', { class: 'hit-title', href: poleHash(hit.pid), tabindex: '-1' }, highlight(hit.headline))) : null,
       hit.description ? clampText(highlight(hit.description), { lines: 2, moreLabel: t('more'), lessLabel: t('less'), cls: 'hit-desc' }) : null,
       matchList(hit.matches, { skipField: 'description' }));
   }
@@ -422,7 +422,7 @@ export function mount(container, ctx) {
         h('span', { class: 'mode-index' }, t('mode.index', { n: hit.mode_index })),
         catBadge(hit.category),
         hit.share != null ? h('span', { class: 'meta share-meta' }, bar(hit.share), h('strong', null, fmtPct(hit.share)), ' ', t('mode.shareOf')) : null),
-      h('p', { class: 'hit-modelabel' }, highlight(hit.label)),
+      h('p', { class: 'hit-modelabel' }, h('a', { class: 'hit-title', href: poleHash(hit.pid, { mode: hit.mode_index }), tabindex: '-1' }, highlight(hit.label))),
       matchList(hit.matches, { skipField: 'mode' }));
   }
 
@@ -439,14 +439,9 @@ export function mount(container, ctx) {
         matchList(p.matches, { skipField: 'description' })))));
   }
 
+  // Rows are plain text (easy to select and copy); the id and the title are the links.
   function rowFor(item) {
-    const row = data.groupBy === 'neuron' ? neuronRow(item) : data.groupBy === 'mode' ? modeRow(item) : poleRow(item);
-    row.addEventListener('click', (ev) => {
-      // A click on the row (not on a link, button or selected text) opens it.
-      if (ev.target.closest('a, button, summary, input') || String(window.getSelection()) !== '') return;
-      ctx.go(row.dataset.href);
-    });
-    return row;
+    return data.groupBy === 'neuron' ? neuronRow(item) : data.groupBy === 'mode' ? modeRow(item) : poleRow(item);
   }
 
   function appendRows(items, from) {
@@ -501,7 +496,12 @@ export function mount(container, ctx) {
       h('a', { class: 'btn btn-small', href: apiUrl('/api/v1/search', { ...stateToParams(state), limit: PAGE }, { withKey: false }), target: '_blank', rel: 'noopener', title: t('search.apiTip') }, icon('code', 14), 'API'));
 
     const noteItems = data.notes.map((n) => h('li', null, n));
-    replace(notes, noteItems.length ? h('ul', { class: 'notes' }, noteItems) : null);
+    // Filters the server read out of the query text (layer:30 cat:fn …) are echoed back.
+    const sent = stateToQuery(state);
+    const inline = Object.entries(data.understood || {}).filter(([k, v]) => !['q', 'limit', 'offset', 'facets', 'snippets'].includes(k) && JSON.stringify(v) !== JSON.stringify(sent[k]));
+    replace(notes,
+      inline.length ? h('p', { class: 'understood muted small' }, t('search.understood'), ' ', inline.map(([k, v]) => h('code', null, `${k}: ${Array.isArray(v) ? v.join(', ') : v}`))) : null,
+      noteItems.length ? h('ul', { class: 'notes' }, noteItems) : null);
 
     clear(list);
     if (!data.items.length) {
@@ -510,6 +510,7 @@ export function mount(container, ctx) {
       if (state.match !== 'semantic' && state.q.trim()) tips.push(h('li', null, h('button', { type: 'button', class: 'linkish', onclick: () => apply({ match: 'semantic' }) }, t('empty.trySemantic'))));
       if (state.match !== 'substring' && state.match !== 'semantic' && state.q.trim()) tips.push(h('li', null, h('button', { type: 'button', class: 'linkish', onclick: () => apply({ match: 'substring' }) }, t('empty.trySubstring'))));
       if (Object.keys(filterParams({ ...state, q: '' })).length) tips.push(h('li', null, h('button', { type: 'button', class: 'linkish', onclick: () => apply({ ...defaultState(), q: state.q }) }, t('empty.dropFilters'))));
+      if (state.scope.includes('examples') && !idx.example_texts) tips.push(h('li', null, t('empty.noExamples')));
       tips.push(h('li', null, t('empty.deepHint', { n: fmtInt(idx.poles_with_deep_texts ?? 0) })));
       list.appendChild(notice('empty', t('empty.title'), h('p', null, t('empty.text')), h('ul', { class: 'empty-tips' }, tips)));
     } else {

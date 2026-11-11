@@ -84,6 +84,7 @@ const S = {
   'search.order': ['Reihenfolge', 'Order'],
   'search.results': ['Suchergebnisse', 'Search results'],
   'search.shown': ['{shown} von {total} geladen', '{shown} of {total} loaded'],
+  'search.understood': ['Im Suchtext erkannt:', 'Read from the query text:'],
   'search.onMap': ['Auf Karte', 'On map'],
   'search.apiTip': ['Dieselbe Suche als API-Aufruf (JSON) – z. B. für Skripte oder Chatbots', 'The same search as an API call (JSON) – e.g. for scripts or chatbots'],
   'match.auto': ['Auto', 'Auto'],
@@ -219,6 +220,7 @@ const S = {
   'empty.trySemantic': ['Nach Bedeutung suchen (Suchart „Bedeutung“)', 'Search by meaning (match "Semantic")'],
   'empty.trySubstring': ['Als Teilstring suchen', 'Search as a substring'],
   'empty.dropFilters': ['Filter entfernen, Suchtext behalten', 'Drop the filters, keep the text'],
+  'empty.noExamples': ['Auf diesem Server sind noch keine Beispielpassagen indexiert (Option „Auch Beispielpassagen indexieren“ beim Herunterladen).', 'No example passages are indexed on this server yet (option "Also index example passages" when downloading).'],
   'empty.deepHint': ['Volltexte und Beispiele sind nur für heruntergeladene Pole durchsuchbar (derzeit {n}). Mit „Region herunterladen“ lässt sich das erweitern.', 'Deep texts and examples are searchable only for downloaded poles ({n} right now). "Download region" extends that.'],
   'empty.section': ['Für diesen Abschnitt liegen keine Daten vor.', 'There is no data for this section.'],
 

@@ -197,6 +197,19 @@ async function main() {
     await page.waitForSelector('.hit-pole mark', { timeout: 8000 });
   }, page);
 
+  await check('load more appends the next page (next_offset)', async () => {
+    await page.goto(`${BASE}/#/search?sort=id`);
+    await page.waitForSelector('.hit-pole');
+    const before = await count(page, '.hit-pole');
+    const more = page.locator('[data-action="more"]');
+    if (await more.count() === 0) return; // fewer hits than one page
+    await more.scrollIntoViewIfNeeded();
+    await page.waitForFunction((n) => document.querySelectorAll('.hit-pole').length > n, before, { timeout: 8000 });
+    assert(/\d/.test(await page.locator('.results-foot').innerText()), 'no "N of TOTAL loaded" line');
+    await page.goto(`${BASE}/#/search?q=${encodeURIComponent(QUERY)}`);
+    await page.waitForSelector('.hit-pole mark');
+  }, page);
+
   await check('random pole opens a pole page', async () => {
     await page.locator('.searchbar > .btn').click();
     await page.waitForFunction(() => location.hash.startsWith('#/pole/'), null, { timeout: 8000 });
@@ -252,6 +265,19 @@ async function main() {
     if (text !== null) assert(text.includes(POLE.replace(/__(pos|neg)$/, '').replace(/_/g, '/')) || text.includes(POLE), 'clipboard does not hold the pole');
   }, page);
 
+  await check('scope popover changes what copy / download / print include', async () => {
+    await page.locator('.pole-actions button[aria-haspopup]').click();
+    await page.waitForSelector('.popover-scope input[type="checkbox"]');
+    const box = page.locator('.popover-scope label', { hasText: 'Landscape' }).locator('input');
+    const was = await box.isChecked();
+    await box.setChecked(!was);
+    const href = await page.locator('.pole-actions a[download$=".md"]').getAttribute('href');
+    assert(href.includes('landscape') === !was, `include set did not follow the checkbox: ${href}`);
+    await box.setChecked(was);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('.popover-scope', { state: 'detached' });
+  }, page);
+
   await check('download and print links carry the include set', async () => {
     const hrefs = await page.evaluate(() => [...document.querySelectorAll('.pole-actions a')].map((a) => a.getAttribute('href')));
     assert(hrefs.some((h) => h.includes('format=md') && h.includes('include=')), 'no .md download link');
@@ -305,6 +331,22 @@ async function main() {
     assert(info.topbar && info.tabs && info.actions && info.similar, `chrome visible in print: ${JSON.stringify(info)}`);
     assert(info.adjust === 'exact', `print-color-adjust is ${info.adjust}`);
     assert(!/rgba\(0, 0, 0, 0\)|transparent/.test(info.bg), 'token shading lost in print');
+  }, page);
+
+  await check('"print this view" loads the chosen sections, then prints', async () => {
+    await page.evaluate(() => {
+      window.__printed = null;
+      window.print = () => {
+        window.__printed = { mode: document.querySelector('.pole-view').dataset.print, panels: [...document.querySelectorAll('.tabpanel.print-on')].map((p) => `${p.dataset.tab}:${p.dataset.ready}`) };
+        window.dispatchEvent(new Event('afterprint'));
+      };
+    });
+    await page.locator('.pole-actions [data-action="print-view"]').click();
+    await page.waitForFunction(() => window.__printed, null, { timeout: 15000 });
+    const printed = await page.evaluate(() => window.__printed);
+    assert(printed.mode === 'scope', 'print scope not applied');
+    assert(printed.panels.some((x) => x.startsWith('modes:')), `modes panel not marked for print: ${printed.panels}`);
+    assert(await page.evaluate(() => document.querySelector('.pole-view').dataset.print) === 'active', 'print mode not reset afterwards');
   }, page);
 
   await check('a pole that is not downloaded says so and offers to fetch it', async () => {
@@ -379,6 +421,100 @@ async function main() {
       assert(overflow <= 1, `${route} overflows by ${overflow}px`);
     }
     await page.setViewportSize({ width: 1360, height: 900 });
+  }, page);
+
+  // ------------------------------------------------------------------ flows the offline server cannot run (mocked responses, final API shapes)
+  console.log('mirror job, map and graph with mocked responses');
+  await check('region download: start, progress bar, job list, cancel', async () => {
+    let progress = 0;
+    let cancelled = false;
+    const job = () => ({ id: 'job1', label: 'search', state: cancelled ? 'cancelled' : progress >= 1 ? 'done' : 'running', poles: 3, sources: ['subcircuit'], files_to_fetch: 10, files_done: Math.round(progress * 10), progress, report: { requested: 10, fetched: Math.round(progress * 10), skipped: 0, absent: 0, failed: 0, bytes_fetched: 1000, seconds: 1, errors: [], cancelled }, created_at: Date.now() / 1000, finished_at: null, error: '' });
+    await page.route('**/api/v1/info', async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      body.settings = { ...body.settings, offline: false, allow_remote_fetch: true };
+      await route.fulfill({ json: body });
+    });
+    await page.route(/\/api\/v1\/mirror(\?.*)?$/, (route) => {
+      progress = 0.1;
+      route.fulfill({ json: job() });
+    });
+    await page.route(/\/api\/v1\/mirror\/jobs(\?.*)?$/, (route) => route.fulfill({ json: { jobs: progress > 0 ? [job()] : [] } }));
+    await page.route(/\/api\/v1\/mirror\/jobs\/job1/, (route) => {
+      if (route.request().method() === 'DELETE') {
+        cancelled = true;
+        route.fulfill({ json: { cancelled: 'job1' } });
+      } else route.fulfill({ json: job() });
+    });
+    await page.goto(`${BASE}/#/search?q=${encodeURIComponent(QUERY)}`);
+    await page.reload();
+    await page.waitForSelector('.hit-pole');
+    await page.locator('[data-action="region"]').click();
+    await page.waitForSelector('.region-dialog .plan .stat-value');
+    const start = page.locator('.region-dialog .dialog-actions .btn-primary');
+    if (await start.isDisabled()) {
+      // nothing left to fetch for this query on this server: the button is rightly disabled
+      await page.keyboard.press('Escape');
+    } else {
+      await start.click();
+      await page.waitForSelector('.region-dialog .job .progress', { timeout: 8000 });
+      assert(/10/.test(await page.locator('.region-dialog .job .progress').first().getAttribute('aria-valuenow')), 'progress bar does not show 10 %');
+      assert(!(await page.locator('#region-badge').isHidden()), 'no running-job badge in the header');
+      await page.locator('.region-dialog .job .btn-danger').click();
+      await page.waitForSelector('.region-dialog .job.job-cancelled', { timeout: 8000 });
+      await page.keyboard.press('Escape');
+    }
+    await page.unroute('**/api/v1/info');
+    await page.unroute(/\/api\/v1\/mirror(\?.*)?$/);
+    await page.unroute(/\/api\/v1\/mirror\/jobs(\?.*)?$/);
+    await page.unroute(/\/api\/v1\/mirror\/jobs\/job1/);
+  }, page);
+
+  await check('map: points, cluster legend, highlight box, click opens the pole', async () => {
+    const points = [];
+    for (let i = 0; i < 400; i++) points.push({ pid: `L4_E1_N${i}__pos`, x: (i % 20) - 9.5, y: Math.floor(i / 20) - 9.5, layer: 4 + (i % 4) * 5, category: i % 3 ? 'mono' : 'poly', pole: 'pos', label: i === 0 ? 'needle label' : `hay ${i}`, cluster: i % 2 });
+    await page.route('**/api/v1/map*', (route) => route.fulfill({ json: { unit: 'pole', method: 'pca', points: [{ pid: POLE, x: 0, y: 0, layer: 30, category: 'fn', pole: 'pos', label: 'centre point', cluster: 0 }, ...points], clusters: [{ id: 0, size: 201, label: 'even', x: -5, y: 0 }, { id: 1, size: 200, label: 'odd', x: 5, y: 0 }], notes: ['mocked'] } }));
+    await page.goto(`${BASE}/#/map`);
+    await page.waitForSelector('.legend-list li', { timeout: 10000 });
+    assert(await count(page, '.legend-list li') === 2, 'cluster legend incomplete');
+    assert(/401/.test(await page.locator('.map-status').innerText()), 'point count not shown');
+    assert((await page.locator('.map-notes').innerText()).includes('mocked'), 'notes not shown');
+    await page.locator('.map-controls input[type="search"]').nth(1).fill('needle');
+    await page.waitForFunction(() => /\b1\b/.test(document.querySelector('.map-status').textContent.replace(/401/, '')), null, { timeout: 5000 });
+    await page.locator('.map-controls input[type="search"]').nth(1).fill('');
+    await page.locator('.map-controls [data-name="color"][data-value="layer"]').click();
+    await page.waitForFunction(() => document.querySelectorAll('.legend-list li').length === 5, null, { timeout: 5000 });
+    const box = await page.locator('.map-canvas').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForFunction(() => !document.getElementById('tooltip').hidden, null, { timeout: 5000 });
+    assert((await page.locator('#tooltip').innerText()).includes('centre point'), 'hover tooltip does not show the label');
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForFunction((pid) => location.hash.startsWith(`#/pole/${pid}`), POLE, { timeout: 5000 });
+    await page.unroute('**/api/v1/map*');
+  }, page);
+
+  await check('neuron graph: layered picture whose nodes link to their neuron pages', async () => {
+    const did = POLE.replace(/__(pos|neg)$/, '');
+    await page.route('**/api/v1/graph/*', (route) => route.fulfill({ json: { center: did, nodes: [
+      { id: did, layer: 30, label: 'centre', in_atlas: true, mirrored: true, distance: 0 },
+      { id: 'L18_E253_N170', layer: 18, label: 'an input', in_atlas: true, mirrored: false, distance: 1 },
+      { id: 'L22_E11_N3', layer: 22, label: 'not in the atlas', in_atlas: false, mirrored: false, distance: 1 },
+      { id: 'L36_E66_N43', layer: 36, label: 'a reader', in_atlas: true, mirrored: false, distance: 1 },
+    ], edges: [
+      { source: 'L18_E253_N170', target: did, weight: 0.012, sign: '+', kind: 'gate' },
+      { source: 'L22_E11_N3', target: did, weight: 0.004, sign: '-', kind: 'up' },
+      { source: did, target: 'L36_E66_N43', weight: 0.001, sign: '+', kind: 'reader' },
+    ], notes: ['mocked'] } }));
+    await page.goto(`${BASE}/#/neuron/${did}`);
+    await page.waitForSelector('svg.graph .gnode', { timeout: 10000 });
+    assert(await count(page, 'svg.graph .gnode') === 4, 'expected four nodes');
+    assert(await count(page, 'svg.graph path.edge') === 3, 'expected three edges');
+    assert(await count(page, 'svg.graph a.gnode') === 2, 'in-atlas neighbours are not links');
+    const xs = await page.evaluate(() => [...document.querySelectorAll('svg.graph .gnode rect')].map((r) => Number(r.getAttribute('x'))));
+    assert(new Set(xs).size === 4, 'layers are not laid out in columns');
+    await page.locator('svg.graph a.gnode').first().click();
+    await page.waitForFunction(() => location.hash === '#/neuron/L18_E253_N170', null, { timeout: 5000 });
+    await page.unroute('**/api/v1/graph/*');
   }, page);
 
   // ------------------------------------------------------------------ API key and rate limit (mocked responses)

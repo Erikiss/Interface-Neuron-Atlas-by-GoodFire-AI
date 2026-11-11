@@ -498,7 +498,7 @@ class AtlasSource:
         if raw is None:
             return None
         try:
-            value = json.loads(raw)
+            value = parse_json(raw)
         except ValueError as exc:
             self.store.forget(relpath)
             raise UpstreamError(f"{relpath} is not valid JSON: {exc}") from exc
@@ -594,6 +594,37 @@ class AtlasSource:
                 continue
             raise UpstreamError(f"{url} answered HTTP {code}")
         raise UpstreamError(f"{url} failed after {retries + 1} attempts ({last})")
+
+
+_SURROGATE_ESCAPE = re.compile(rb"\\u[dD][89a-fA-F]")
+
+
+def parse_json(raw: bytes) -> Any:
+    """Parse upstream JSON so that every string in it can be written out again as UTF-8.
+
+    The corpus text is raw web data cut into tokens.  A token boundary can fall
+    inside a character, and files that escape non-ASCII text can then carry
+    *half* of a surrogate pair - a string Python accepts but cannot encode.
+    Such halves (and undecodable bytes) are replaced by U+FFFD.
+    """
+    value = json.loads(raw.decode("utf-8", errors="replace"))
+    if _SURROGATE_ESCAPE.search(raw):
+        value = _without_lone_surrogates(value)
+    return value
+
+
+def _without_lone_surrogates(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+        return value
+    if isinstance(value, list):
+        return [_without_lone_surrogates(v) for v in value]
+    if isinstance(value, dict):
+        return {_without_lone_surrogates(k): _without_lone_surrogates(v) for k, v in value.items()}
+    return value
 
 
 def _is_s3_missing(resp: httpx.Response) -> bool:
