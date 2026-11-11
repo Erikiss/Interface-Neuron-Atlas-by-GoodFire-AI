@@ -9,6 +9,7 @@ names.  The raw files stay available untouched through :meth:`Details.raw`.
 from __future__ import annotations
 
 import re
+import statistics
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -131,6 +132,101 @@ def _damage(raw: Any) -> Damage | None:
     return Damage(per_firing=_num(raw.get("per_firing")), ratio=_num(raw.get("ratio")), n_measured=_int(raw.get("n_measured")))
 
 
+def island_threshold(raw: Any) -> float | None:
+    """The θ that an islands file measures ``a_over_theta`` against: ``|act| / a_over_theta``.
+
+    It is one value per neuron (the circuit data's θ), not the pole's θ of the mode data; the file
+    does not store it, so it is recovered from the examples (median, robust to rounding).
+    """
+    values = []
+    for isl in (raw.get("islands") if isinstance(raw, dict) else None) or []:
+        for e in list(isl.get("examples") or []) + list(isl.get("examples_more") or []):
+            act, rel = _num(e.get("act")), _num(e.get("a_over_theta"))
+            if act and rel and rel > 0:
+                values.append(abs(act) / rel)
+    return statistics.median(values) if values else None
+
+
+def island_example(raw: dict[str, Any], island_id: int, slot: int, with_tokens: bool, full: bool = False) -> Example:
+    """One example of an island; ``slot`` is its position in the file (primary sample, then the "more" ones)."""
+    tokens = raw.get("tokens") or []
+    focal = _int(raw.get("focal_idx"))
+    lo, hi = (0, len(tokens)) if full else island_window(tokens, focal)
+    text = ("… " if lo > 0 else "") + mark_focal(tokens, focal, lo, hi) + (" …" if hi < len(tokens) else "")
+    return Example(
+        source="islands",
+        ref=f"island{island_id}:{slot}",
+        group=_ISLAND_LABELS.get(str(raw.get("label"))),
+        act=_num(raw.get("act")),
+        a_rel=_num(raw.get("a_over_theta")),
+        text=text,
+        focal_token=str(tokens[focal][0]) if focal is not None and 0 <= focal < len(tokens) else None,
+        focal_index=focal,
+        tokens=_token_pairs(tokens) if with_tokens else None,
+        token_unit="raw",
+        window=(lo, hi),
+    )
+
+
+def islands_view(raw: dict[str, Any], max_examples: int = 0, with_tokens: bool = False) -> IslandsView:
+    """The island read of a pole: its islands (with up to ``max_examples`` examples each) and island modes.
+
+    Island modes come in file order; grey modes and islands no mode names are merged into one
+    unassigned group at the end, as goodfire.com shows them.
+    """
+    view = IslandsView()
+    known: set[int] = set()
+    for isl in raw.get("islands") or []:
+        iid = _int(isl.get("id"))
+        if iid is None:
+            continue
+        known.add(iid)
+        examples: list[Example] = []
+        if max_examples:
+            # As on the page: the primary sample by strength, then the "more" examples in file order.
+            # Refs keep the file position (as in the search index), whatever the display order.
+            primary = list(enumerate(isl.get("examples") or []))
+            primary.sort(key=lambda item: -abs(_num(item[1].get("act")) or 0.0))
+            more = [(len(primary) + i, e) for i, e in enumerate(isl.get("examples_more") or [])]
+            examples = [island_example(e, iid, slot, with_tokens) for slot, e in (primary + more)[:max_examples]]
+        view.islands.append(
+            Island(
+                id=iid,
+                number=iid + 1,
+                n=_int(isl.get("n")),
+                name=_text(isl.get("name")),
+                description=_text(isl.get("description")),
+                examples=examples,
+            )
+        )
+    used: set[int] = set()
+    unassigned = IslandMode(name=RESIDUE_LABEL, unassigned=True)
+    any_grey = False
+    for m in (raw.get("opus") or {}).get("modes") or []:
+        ids = [i for i in (m.get("island_ids") or []) if i in known]
+        share = None
+        for chip in m.get("chips") or []:
+            found = _FIRING_CHIP.match(str(chip))
+            if found:
+                share = float(found.group(1)) / 100.0
+                break
+        if m.get("grey"):
+            any_grey = True
+            unassigned.islands.extend(i for i in ids if i not in used and i not in unassigned.islands)
+            if share is not None:
+                unassigned.share = (unassigned.share or 0.0) + share
+            continue
+        used.update(ids)
+        view.modes.append(
+            IslandMode(name=_text(m.get("name")), description=_text(m.get("predicate")), share=share, islands=ids)
+        )
+    leftover = [i for i in sorted(known) if i not in used and i not in unassigned.islands]
+    unassigned.islands.extend(leftover)
+    if any_grey or unassigned.islands:
+        view.modes.append(unassigned)
+    return view
+
+
 class Details:
     """Builds :class:`PoleDetail` / :class:`NeuronDetail` documents and feeds the deep search index."""
 
@@ -225,7 +321,15 @@ class Details:
         if wants_islands:
             isl = self._load("islands", pole_path("islands", pid), p.has_islands, sources, remote)
             if isinstance(isl, dict):
-                detail.islands = self._islands_view(isl, max_examples if with_examples else 0, with_tokens)
+                detail.islands = islands_view(isl, max_examples if with_examples else 0, with_tokens)
+                theta = island_threshold(isl)
+                shown = any(i.examples for i in detail.islands.islands)
+                if shown and theta and detail.theta and abs(theta - detail.theta) > 0.02 * detail.theta:
+                    detail.notes.append(
+                        f"Island examples give a_rel in multiples of the islands data's own threshold (θ ≈ {theta:.4g}, "
+                        f"one per neuron), not of the pole's θ = {detail.theta:.4g} that the mode examples use; "
+                        "compare their raw act instead."
+                    )
         else:
             sources["islands"] = "not_requested" if p.has_islands else "absent"
 
@@ -412,78 +516,6 @@ class Details:
                         return out
         return out
 
-    # ------------------------------------------------------------------ islands
-
-    def _island_example(self, raw: dict[str, Any], island_id: int, slot: int, with_tokens: bool, full: bool = False) -> Example:
-        tokens = raw.get("tokens") or []
-        focal = _int(raw.get("focal_idx"))
-        lo, hi = (0, len(tokens)) if full else island_window(tokens, focal)
-        text = ("… " if lo > 0 else "") + mark_focal(tokens, focal, lo, hi) + (" …" if hi < len(tokens) else "")
-        return Example(
-            source="islands",
-            ref=f"island{island_id}:{slot}",
-            group=_ISLAND_LABELS.get(str(raw.get("label"))),
-            act=_num(raw.get("act")),
-            a_rel=_num(raw.get("a_over_theta")),
-            text=text,
-            focal_token=str(tokens[focal][0]) if focal is not None and 0 <= focal < len(tokens) else None,
-            focal_index=focal,
-            tokens=_token_pairs(tokens) if with_tokens else None,
-            token_unit="raw",
-            window=(lo, hi),
-        )
-
-    def _islands_view(self, raw: dict[str, Any], max_examples: int, with_tokens: bool) -> IslandsView:
-        view = IslandsView()
-        known: set[int] = set()
-        for isl in raw.get("islands") or []:
-            iid = _int(isl.get("id"))
-            if iid is None:
-                continue
-            known.add(iid)
-            examples: list[Example] = []
-            if max_examples:
-                # As on the page: the primary sample by strength, then the "more" examples in file order.
-                primary = sorted(isl.get("examples") or [], key=lambda e: -abs(_num(e.get("act")) or 0.0))
-                pool = primary + list(isl.get("examples_more") or [])
-                examples = [self._island_example(e, iid, i, with_tokens) for i, e in enumerate(pool[:max_examples])]
-            view.islands.append(
-                Island(
-                    id=iid,
-                    number=iid + 1,
-                    n=_int(isl.get("n")),
-                    name=_text(isl.get("name")),
-                    description=_text(isl.get("description")),
-                    examples=examples,
-                )
-            )
-        used: set[int] = set()
-        unassigned = IslandMode(name=RESIDUE_LABEL, unassigned=True)
-        any_grey = False
-        for m in (raw.get("opus") or {}).get("modes") or []:
-            ids = [i for i in (m.get("island_ids") or []) if i in known]
-            share = None
-            for chip in m.get("chips") or []:
-                found = _FIRING_CHIP.match(str(chip))
-                if found:
-                    share = float(found.group(1)) / 100.0
-                    break
-            if m.get("grey"):
-                any_grey = True
-                unassigned.islands.extend(i for i in ids if i not in used and i not in unassigned.islands)
-                if share is not None:
-                    unassigned.share = (unassigned.share or 0.0) + share
-                continue
-            used.update(ids)
-            view.modes.append(
-                IslandMode(name=_text(m.get("name")), description=_text(m.get("predicate")), share=share, islands=ids)
-            )
-        leftover = [i for i in sorted(known) if i not in used and i not in unassigned.islands]
-        unassigned.islands.extend(leftover)
-        if any_grey or unassigned.islands:
-            view.modes.append(unassigned)
-        return view
-
     # ------------------------------------------------------------------ neuron
 
     def neuron(
@@ -555,15 +587,17 @@ class Details:
                     if _text(m.get(key)):
                         yield TextField("island", m[key])
             for isl in raw.get("islands") or []:
-                ref = f"island{isl.get('id')}"
+                iid = _int(isl.get("id"))
+                ref = f"island{iid}" if iid is not None else None
                 for key in ("name", "description"):
                     if _text(isl.get(key)):
                         yield TextField("island", isl[key], ref=ref)
+                # Example refs number the file order (primary sample, then the "more" examples), as the pole detail does.
                 pool = list(isl.get("examples") or []) + list(isl.get("examples_more") or [])
                 for slot, e in enumerate(pool):
                     text = mark_focal(e.get("tokens") or [], _int(e.get("focal_idx"))).strip()
                     if text:
-                        yield TextField("example", text, ref=f"{ref}:{slot}", scope=SCOPE_EXAMPLES)
+                        yield TextField("example", text, ref=f"{ref}:{slot}" if ref else None, scope=SCOPE_EXAMPLES)
         elif kind == "overview":
             yield from overview_texts(raw)
 

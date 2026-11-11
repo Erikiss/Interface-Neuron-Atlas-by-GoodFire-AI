@@ -53,7 +53,13 @@ GLOSSARY: dict[str, Any] = {
             "real-text frequency (landscape / Overview). The Modes tab shows the same idea over the sampled "
             "firings instead (`damage.ratio` of a mode); the two numbers differ, often by a lot."
         ),
-        "main_damage_share": "Share of the damage carried by the pole's main mode.",
+        "main_damage_share": (
+            "The main mode's share of the pole's damage, which decides the category fn (at least 90 %). The main "
+            "mode is the readable mode with the most sampled firings - not necessarily the most damaging one - and "
+            "the share is taken among the readable modes only (Q3/Q4 and unassigned firings are left out), over the "
+            "sampled firings without weighting to real text. Not comparable with damage_share; the damage filter "
+            "and sort=damage use this number."
+        ),
         "category": {
             "mono": "single mode - “Everything this pole fires on fits one specific meaning.”",
             "fn": (
@@ -87,9 +93,11 @@ GLOSSARY: dict[str, Any] = {
             "1,000 strongest firings."
         ),
         "gate / up": (
-            "The two inputs of a neuron. Gate drivers open the gate and gate opposers close it; up drivers "
-            "raise the value the neuron writes and up opposers lower it. Readers are later neurons that use "
-            "the neuron's output."
+            "The two inputs of a neuron, which writes silu(gate) × up. Gate drivers open the gate and gate "
+            "opposers close it, on either pole. Up drivers push the up signal towards the pole's own sign and up "
+            "opposers push it the other way: on a positive pole up drivers raise up, on a negative pole they lower "
+            "it (“groups that lower up are the ones pushing it to fire”). Readers are later neurons that use the "
+            "neuron's output."
         ),
         "neuron scientist": (
             "An LLM agent that wrote the Overview explanation of a pole and ran controlled experiments "
