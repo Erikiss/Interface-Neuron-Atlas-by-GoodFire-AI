@@ -61,10 +61,57 @@ def test_inline_filters(atlas):
 
 
 def test_unknown_inline_values_are_reported_not_swallowed(atlas):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="has"):
         atlas.search("has:teleportation")
-    res = atlas.search("rivers layer:abc")
-    assert any("ignored filter" in n for n in res.notes)
+    with pytest.raises(ValueError, match="not a number"):
+        atlas.search("rivers layer:abc")
+    with pytest.raises(ValueError, match="neither"):
+        atlas.search("verdict:banana")
+    with pytest.raises(ValueError, match="unknown category"):
+        atlas.search("cat:purple")
+    # The one-letter aliases give way to text: "e:mail" is a word, not a broken filter.
+    res = atlas.search("e:mail")
+    assert any("searched as text" in n for n in res.notes)
+
+
+def test_inline_filters_need_the_value_right_after_the_colon(atlas):
+    # "in: chapter" in a sentence is text, not a scope filter.
+    assert parse_query(SearchQuery(q="results in: chapter")).text == "results in: chapter"
+    # Inside quotes nothing is a filter.
+    parsed = parse_query(SearchQuery(q='"layer:4 notes"'))
+    assert parsed.query.layers is None and parsed.groups[0][0].phrase
+
+
+def test_ranges_are_bounded_and_may_be_reversed(atlas):
+    parsed = parse_query(SearchQuery(q="layer:36..9 expert:3..1"))
+    assert (parsed.query.layer_min, parsed.query.layer_max) == (9, 36) and parsed.query.experts == [1, 2, 3]
+    with pytest.raises(ValueError, match="too large"):
+        parse_query(SearchQuery(q="neuron:0..99999999999"))
+    with pytest.raises(ValueError, match="usable"):
+        parse_query(SearchQuery(q="sim:>" + "9" * 400))
+
+
+def test_operators_are_capitals_only_and_terms_are_limited(atlas):
+    # Lower-case "or", "not" are words; a trailing NOT does not swallow the terms before it.
+    assert pids(atlas.search("chess or braille")) == []
+    assert pids(atlas.search("chess NOT")) == [fakeatlas.MIXED]
+    assert atlas.search("NOT").total == 0  # searched as a word, not "everything"
+    many = " ".join(f"word{i}" for i in range(40))
+    with pytest.raises(ValueError, match="too many search terms"):
+        atlas.search(many)
+    assert atlas.search(" ".join(["chess"] * 200)).total == 1  # repeats count once
+
+
+def test_punctuation_is_matched_as_characters_not_as_one_letter_words(atlas):
+    # Without the fix "C++" became the word prefix c* and matched almost everything.
+    assert atlas.search("C++").total == 0
+    assert pids(atlas.search("#ff8800")) == [fakeatlas.MIXED]
+
+
+def test_whole_words_rank_above_word_beginnings(atlas):
+    atlas.search_index.index_deep(fakeatlas.FN, "subcircuit", "t1", [TextField("subcircuit", "chessboard patterns")])
+    hits = pids(atlas.search("chess"))
+    assert hits[0] == fakeatlas.MIXED and fakeatlas.FN in hits
 
 
 def test_structured_filters_and_facets(atlas):

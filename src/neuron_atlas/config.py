@@ -31,11 +31,19 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value.strip()
 
 
+_TRUE = {"1", "true", "yes", "y", "on"}
+_FALSE = {"0", "false", "no", "n", "off"}
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = _env(name)
     if value is None:
         return default
-    return value.lower() in {"1", "true", "yes", "on"}
+    if value.lower() in _TRUE:
+        return True
+    if value.lower() in _FALSE:
+        return False
+    raise ValueError(f"ATLAS_{name}={value!r} is not a yes/no value (use 1/0, true/false, yes/no, on/off)")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -102,6 +110,8 @@ class Settings:
     max_batch_size: int = 200
     #: May API callers trigger upstream fetches for poles that are not mirrored yet?
     allow_remote_fetch: bool = True
+    #: Regular-expression search (each search is limited to a few seconds of CPU).
+    allow_regex: bool = True
     #: May API / MCP callers start mirror jobs, and how many poles may one such job cover?
     #: (The command line is not limited.)
     allow_mirror: bool = True
@@ -131,6 +141,7 @@ class Settings:
             max_page_size=_env_int("MAX_PAGE_SIZE", 500),
             max_batch_size=_env_int("MAX_BATCH_SIZE", 200),
             allow_remote_fetch=_env_bool("ALLOW_REMOTE_FETCH", True),
+            allow_regex=_env_bool("ALLOW_REGEX", True),
             allow_mirror=_env_bool("ALLOW_MIRROR", True),
             max_mirror_poles=_env_int("MAX_MIRROR_POLES", 500),
             allowed_hosts=tuple(h.strip() for h in (_env("ALLOWED_HOSTS") or "").split(",") if h.strip()),

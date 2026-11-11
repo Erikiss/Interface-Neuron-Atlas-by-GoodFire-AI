@@ -527,12 +527,14 @@ class Details:
             for key in ("summary", "unified_description", "label"):
                 if _text(raw.get(key)):
                     yield TextField("summary", raw[key])
+            # Texts are attributed to the pole's readable modes only; the Q3/Q4 and residue groups
+            # are not modes of the pole's mode list (their subcircuit texts stay searchable).
             mode_of: dict[str, int] = {}
             for index, m in enumerate(raw.get("modes") or []):
-                for sid in m.get("subcircuits") or []:
-                    mode_of.setdefault(str(sid), index)
                 if m.get("residue"):
                     continue
+                for sid in m.get("subcircuits") or []:
+                    mode_of.setdefault(str(sid), index)
                 if _text(m.get("description")):
                     yield TextField("mode_description", m["description"], mode_index=index)
             for sid, s in (raw.get("subcircuits") or {}).items():
@@ -576,10 +578,12 @@ class Details:
             info = self.source.store.info(relpath)
             if info.status != "present":
                 continue
-            sha = info.sha256 + (":ex" if examples else "")
+            # Never drop example passages that were indexed before (e.g. by a mirror run with examples).
+            with_examples = examples or state.get(kind, "").endswith(":ex")
+            sha = info.sha256 + (":ex" if with_examples else "")
             if state.get(kind) == sha:
                 continue
             raw = self.source.get_json(relpath, remote=False)
-            fields = [f for f in self.text_fields(kind, raw) if examples or f.scope == SCOPE_DEEP]
+            fields = [f for f in self.text_fields(kind, raw) if with_examples or f.scope == SCOPE_DEEP]
             added += self.search.index_deep(pid, kind, sha, fields)
         return added

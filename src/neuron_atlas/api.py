@@ -51,6 +51,7 @@ from .models import (
     SearchResponse,
     SimilarResponse,
 )
+from .search import int_list
 from .service import Atlas, NotFound
 from .upstream import NotMirrored, UpstreamError
 
@@ -74,20 +75,12 @@ def _csv(value: str | None) -> list[str] | None:
 
 
 def _csv_int(value: str | None, name: str) -> list[int] | None:
-    items = _csv(value)
-    if items is None:
+    if value is None or not value.strip():
         return None
-    out: list[int] = []
-    for item in items:
-        try:
-            if ".." in item:
-                lo, hi = item.split("..", 1)
-                out.extend(range(int(lo), int(hi) + 1))
-            else:
-                out.append(int(item))
-        except ValueError:
-            raise HTTPException(400, f"{name}: {item!r} is not a number or a range like 9..36") from None
-    return out
+    try:
+        return int_list(value, name) or None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 class _ClientLimiter:

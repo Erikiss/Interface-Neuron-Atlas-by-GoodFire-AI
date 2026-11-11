@@ -113,6 +113,7 @@ class Atlas:
                         self.source.store.root / "search.sqlite",
                         mirrored=lambda pids: mirrored_sources(catalog, self.source, pids),
                         semantic=self.semantic,
+                        allow_regex=self.settings.allow_regex,
                     )
         return self._search
 

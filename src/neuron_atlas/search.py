@@ -17,18 +17,21 @@ paging are done in Python over the in-memory catalog, which is tiny.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import re
 import sqlite3
+import tempfile
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import regex
 from pydantic import ValidationError
 
 from .catalog import CATEGORIES, Catalog, PoleEntry
@@ -43,7 +46,7 @@ from .models import (
     SearchResponse,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCOPE_LABELS, SCOPE_DEEP, SCOPE_EXAMPLES = 0, 1, 2
 _SCOPE_BY_NAME = {"labels": SCOPE_LABELS, "deep": SCOPE_DEEP, "examples": SCOPE_EXAMPLES}
@@ -67,8 +70,19 @@ KIND_WEIGHT = {
     "example": 0.3,
 }
 
-_MAX_ROWS_PER_TERM = 50_000
+#: Most search terms one query may carry (repeats are counted once).
+MAX_TERMS = 32
+#: Most values an integer range such as ``expert:0..255`` may expand to.
+MAX_RANGE_VALUES = 4096
 _MAX_REGEX_LENGTH = 300
+#: Total time one regular-expression search may take.
+_REGEX_BUDGET_SECONDS = 5.0
+#: Word beginnings (``riv`` -> river) are tried for words of at least this length ...
+_PREFIX_MIN = 3
+#: ... and count less than a whole-word hit, so that ``cat`` ranks "cat" above "category".
+_PREFIX_WEIGHT = 0.6
+#: Semantic search keeps poles scoring at least this share of the best score.
+_SEMANTIC_KEEP = 0.3
 
 
 @dataclass(frozen=True)
@@ -82,19 +96,26 @@ class TextField:
     scope: int = SCOPE_DEEP
 
 
+#: One matching text, best per (pole, mode, kind of text): (score, kind, mode_index, table, rowid).
+Row = tuple[float, str, "int | None", str, int]
+
+
 # --------------------------------------------------------------------------- query parsing
 
-_INLINE = re.compile(
-    r"(?<!\S)(?P<key>layer|l|expert|e|neuron|n|pole|cat|category|verdict|modes|sim|simulatability|"
-    r"damage|has|lacks|sample|in|sort|group)\s*:\s*(?P<val>\"[^\"]*\"|\S+)",
-    re.IGNORECASE,
-)
+_FILTER_KEYS = (
+    "layer", "l", "expert", "e", "neuron", "n", "pole", "cat", "category", "verdict", "modes", "sim",
+    "simulatability", "damage", "has", "lacks", "sample", "in", "sort", "group",
+)  # fmt: skip
+#: ``key:value`` - no space after the colon, so ordinary sentences ("results in: …") stay text.
+_INLINE = re.compile(rf"^(?P<key>{'|'.join(_FILTER_KEYS)}):(?P<val>\S+)$", re.IGNORECASE)
 _NUM = r"-?\d+(?:\.\d+)?"
 _RANGE = re.compile(rf"^({_NUM})\.\.({_NUM})$")
 _CMP = re.compile(rf"^(>=|<=|>|<|=)?({_NUM})$")
 _ID_PART = re.compile(r"^(?:L(?P<L>\d{1,3}))?[\s_/]*(?:E(?P<E>\d{1,4}))?[\s_/]*(?:N(?P<N>\d{1,4}))?$", re.IGNORECASE)
 _TOKEN = re.compile(r'(-?)"([^"]*)"|(\S+)')
 _WORDCHAR = re.compile(r"\w", re.UNICODE)
+#: Text the word index can take as it is: letters, digits and spaces only.
+_PLAIN = re.compile(r"[\w\s]+", re.UNICODE)
 
 _CAT_ALIASES = {
     "mono": "mono", "single": "mono", "monosemantic": "mono",
@@ -111,6 +132,10 @@ class Term:
     phrase: bool = False
     prefix: bool = False
     negate: bool = False
+
+    @property
+    def key(self) -> tuple[str, bool, bool]:
+        return (self.text.casefold(), self.phrase, self.prefix)
 
 
 @dataclass
@@ -130,104 +155,150 @@ def _bounds(value: str) -> tuple[float | None, float | None]:
     """``5`` -> (5, 5); ``>=5`` -> (5, None); ``<0.3`` -> (None, 0.3-eps); ``9..36`` -> (9, 36)."""
     m = _RANGE.match(value)
     if m:
-        return float(m.group(1)), float(m.group(2))
-    m = _CMP.match(value)
-    if not m:
-        raise ValueError(value)
-    op, num = m.group(1) or "=", float(m.group(2))
-    eps = 1e-9
-    return {
-        "=": (num, num),
-        ">=": (num, None),
-        ">": (num + eps, None),
-        "<=": (None, num),
-        "<": (None, num - eps),
-    }[op]
+        lo, hi = float(m.group(1)), float(m.group(2))
+        bounds: tuple[float | None, float | None] = (min(lo, hi), max(lo, hi))
+    else:
+        m = _CMP.match(value)
+        if not m:
+            raise ValueError(f"{value!r} is not a number, a comparison like >=3 or a range like 9..36")
+        op, num = m.group(1) or "=", float(m.group(2))
+        eps = 1e-9
+        bounds = {
+            "=": (num, num),
+            ">=": (num, None),
+            ">": (num + eps, None),
+            "<=": (None, num),
+            "<": (None, num - eps),
+        }[op]
+    if any(b is not None and not math.isfinite(b) for b in bounds):
+        raise ValueError(f"{value!r} is not a usable number")
+    return bounds
 
 
-def _int_list(value: str) -> list[int]:
+def int_list(value: str, name: str = "value") -> list[int]:
+    """``4,9..14`` -> [4, 9, 10, 11, 12, 13, 14]; ranges may be written either way round.
+
+    Raises ``ValueError`` for anything else, and for ranges that would expand to
+    more than :data:`MAX_RANGE_VALUES` values.
+    """
     out: list[int] = []
     for part in value.split(","):
         part = part.strip()
         if not part:
             continue
         m = _RANGE.match(part)
-        if m:
-            out.extend(range(int(float(m.group(1))), int(float(m.group(2))) + 1))
-        else:
-            out.append(int(part))
+        try:
+            if m:
+                lo, hi = sorted((int(float(m.group(1))), int(float(m.group(2)))))
+                if hi - lo >= MAX_RANGE_VALUES:
+                    raise ValueError(f"{name}: the range {part} is too large (at most {MAX_RANGE_VALUES} values)")
+                out.extend(range(lo, hi + 1))
+            else:
+                out.append(int(part))
+        except OverflowError:
+            raise ValueError(f"{name}: {part!r} is not a usable number") from None
+        except ValueError as exc:
+            if "too large" in str(exc):
+                raise
+            raise ValueError(f"{name}: {part!r} is not a number or a range like 9..36") from None
+        if len(out) > MAX_RANGE_VALUES:
+            raise ValueError(f"{name}: at most {MAX_RANGE_VALUES} values")
     return out
 
 
-def parse_query(query: SearchQuery) -> ParsedQuery:
-    """Resolve inline ``key:value`` filters and split the remaining text into clauses."""
+def _apply_filter(q: SearchQuery, key: str, val: str) -> None:
+    """Fold one inline ``key:value`` into ``q``; raises ``ValueError`` with a readable message."""
+    from .ids import normalise_pole
+
+    if key in ("layer", "l"):
+        if "," in val:
+            q.layers = sorted(set((q.layers or []) + int_list(val, "layer")))
+            return
+        lo, hi = _bounds(val)
+        if lo is not None and lo == hi:
+            q.layers = sorted(set((q.layers or []) + [int(lo)]))
+        else:
+            q.layer_min = int(math.ceil(lo)) if lo is not None else q.layer_min
+            q.layer_max = int(math.floor(hi)) if hi is not None else q.layer_max
+    elif key in ("expert", "e"):
+        q.experts = sorted(set((q.experts or []) + int_list(val, "expert")))
+    elif key in ("neuron", "n"):
+        q.neurons = sorted(set((q.neurons or []) + int_list(val, "neuron")))
+    elif key == "pole":
+        q.pole = normalise_pole(val)  # type: ignore[assignment]
+    elif key in ("cat", "category"):
+        cats = []
+        for c in val.split(","):
+            if c.strip():
+                if c.strip().lower() not in _CAT_ALIASES:
+                    raise ValueError(f"cat: unknown category {c!r} (mono, fn, poly, dark, none)")
+                cats.append(_CAT_ALIASES[c.strip().lower()])
+        q.categories = sorted(set((q.categories or []) + cats))  # type: ignore[arg-type]
+    elif key == "verdict":
+        v = val.lower()
+        if v.startswith("mono"):
+            q.verdict = "monosemantic"
+        elif v.startswith("poly"):
+            q.verdict = "polysemantic"
+        else:
+            raise ValueError(f"verdict: {val!r} is neither monosemantic nor polysemantic")
+    elif key == "modes":
+        lo, hi = _bounds(val)
+        q.modes_min = int(math.ceil(lo)) if lo is not None else q.modes_min
+        q.modes_max = int(math.floor(hi)) if hi is not None else q.modes_max
+    elif key in ("sim", "simulatability"):
+        lo, hi = _bounds(val)
+        q.simulatability_min = lo if lo is not None else q.simulatability_min
+        q.simulatability_max = hi if hi is not None else q.simulatability_max
+    elif key == "damage":
+        lo, hi = _bounds(val)
+        q.damage_min = lo if lo is not None else q.damage_min
+        q.damage_max = hi if hi is not None else q.damage_max
+    elif key == "has":
+        q.has = sorted(set((q.has or []) + [v.strip().lower() for v in val.split(",") if v.strip()]))  # type: ignore[arg-type]
+    elif key == "lacks":
+        q.lacks = sorted(set((q.lacks or []) + [v.strip().lower() for v in val.split(",") if v.strip()]))  # type: ignore[arg-type]
+    elif key == "sample":
+        q.sample = val.lower()  # type: ignore[assignment]
+    elif key == "in":
+        q.scope = [v.strip().lower() for v in val.split(",") if v.strip()]  # type: ignore[assignment]
+    elif key == "sort":
+        q.sort = {"sim": "simulatability"}.get(val.lower(), val.lower())  # type: ignore[assignment]
+    elif key == "group":
+        q.group_by = val.lower()  # type: ignore[assignment]
+
+
+def parse_query(query: SearchQuery, known: Callable[[str], bool] | None = None) -> ParsedQuery:
+    """Resolve inline ``key:value`` filters and split the remaining text into clauses.
+
+    Operators are written in capitals (``OR``, ``AND``, ``NOT``); in lower case
+    they are ordinary words.  ``known(did)`` tells whether a neuron exists: bare
+    number triples such as ``24/7/365`` only count as an id when it does.
+    """
     q = query.model_copy(deep=True)
     parsed = ParsedQuery(q)
-    text = q.q or ""
-
-    def take(m: re.Match[str]) -> str:
-        key, val = m.group("key").lower(), m.group("val").strip('"')
+    words: list[str] = []
+    for m in _TOKEN.finditer(q.q or ""):
+        token = m.group(0)
+        inline = _INLINE.match(token) if m.group(3) is not None else None
+        if inline is None:
+            words.append(token)
+            continue
+        key, val = inline.group("key").lower(), inline.group("val")
         try:
-            if key in ("layer", "l"):
-                lo, hi = _bounds(val) if not re.search(r",", val) else (None, None)
-                if "," in val or _RANGE.match(val) or _CMP.match(val) is None:
-                    q.layers = sorted(set((q.layers or []) + _int_list(val)))
-                elif lo == hi and lo is not None:
-                    q.layers = sorted(set((q.layers or []) + [int(lo)]))
-                else:
-                    q.layer_min = int(math.ceil(lo)) if lo is not None else q.layer_min
-                    q.layer_max = int(math.floor(hi)) if hi is not None else q.layer_max
-            elif key in ("expert", "e"):
-                q.experts = sorted(set((q.experts or []) + _int_list(val)))
-            elif key in ("neuron", "n"):
-                q.neurons = sorted(set((q.neurons or []) + _int_list(val)))
-            elif key == "pole":
-                from .ids import normalise_pole
-
-                q.pole = normalise_pole(val)  # type: ignore[assignment]
-            elif key in ("cat", "category"):
-                cats = [_CAT_ALIASES[c.strip().lower()] for c in val.split(",") if c.strip()]
-                q.categories = sorted(set((q.categories or []) + cats))  # type: ignore[arg-type]
-            elif key == "verdict":
-                v = val.lower()
-                q.verdict = "monosemantic" if v.startswith("mono") else "polysemantic"
-            elif key == "modes":
-                lo, hi = _bounds(val)
-                q.modes_min = int(math.ceil(lo)) if lo is not None else q.modes_min
-                q.modes_max = int(math.floor(hi)) if hi is not None else q.modes_max
-            elif key in ("sim", "simulatability"):
-                lo, hi = _bounds(val)
-                q.simulatability_min = lo if lo is not None else q.simulatability_min
-                q.simulatability_max = hi if hi is not None else q.simulatability_max
-            elif key == "damage":
-                lo, hi = _bounds(val)
-                q.damage_min = lo if lo is not None else q.damage_min
-                q.damage_max = hi if hi is not None else q.damage_max
-            elif key == "has":
-                q.has = sorted(set((q.has or []) + [v.strip().lower() for v in val.split(",") if v.strip()]))  # type: ignore[arg-type]
-            elif key == "lacks":
-                q.lacks = sorted(set((q.lacks or []) + [v.strip().lower() for v in val.split(",") if v.strip()]))  # type: ignore[arg-type]
-            elif key == "sample":
-                q.sample = val.lower()  # type: ignore[assignment]
-            elif key == "in":
-                q.scope = [v.strip().lower() for v in val.split(",") if v.strip()]  # type: ignore[assignment]
-            elif key == "sort":
-                q.sort = {"sim": "simulatability"}.get(val.lower(), val.lower())  # type: ignore[assignment]
-            elif key == "group":
-                q.group_by = val.lower()  # type: ignore[assignment]
-        except (ValueError, KeyError):
-            parsed.notes.append(f"ignored filter {m.group(0)!r}: could not read the value")
-            return " "
-        return " "
-
-    text = _INLINE.sub(take, text)
-    # Re-validate what the inline filters wrote (rejects e.g. has:nonsense with a clear error).
+            _apply_filter(q, key, val)
+        except (ValueError, KeyError, OverflowError) as exc:
+            if key in ("l", "e", "n"):  # short aliases: "e:mail" is more likely text than a filter
+                words.append(token)
+                parsed.notes.append(f"{token!r} was searched as text (not a valid {key}: filter)")
+                continue
+            raise ValueError(f"invalid inline filter {token!r}: {exc}") from None
     try:
         parsed.query = q = SearchQuery.model_validate(q.model_dump())
     except ValidationError as exc:
         problems = "; ".join(f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in exc.errors())
         raise ValueError(f"invalid inline filter ({problems})") from None
-    text = " ".join(text.split())
+    text = " ".join(" ".join(words).split())
     parsed.text = text
     if not text:
         return parsed
@@ -242,34 +313,37 @@ def parse_query(query: SearchQuery) -> ParsedQuery:
     ref = parse_reference(text)
     if ref:
         nid, pole = ref
-        parsed.direct = [nid.pid(pole)] if pole else [nid.pid("pos"), nid.pid("neg")]
-        return parsed
+        bare = not re.search(r"[A-Za-z]", text.replace("pos", "").replace("neg", ""))
+        if not bare or known is None or known(nid.did):
+            parsed.direct = [nid.pid(pole)] if pole else [nid.pid("pos"), nid.pid("neg")]
+            if bare:
+                parsed.notes.append(f"{text!r} was read as the neuron id {nid.display}; put it in quotes to search the text")
+            return parsed
 
     group: list[Term] = []
     pending_or = False
+    pending_not = False
     for m in _TOKEN.finditer(text):
         if m.group(3) is not None:
             raw = m.group(3)
-            if raw.upper() == "OR":
+            if raw == "OR":
                 pending_or = bool(group) or bool(parsed.groups)
                 continue
-            if raw.upper() == "AND":
+            if raw == "AND":
+                continue
+            if raw == "NOT":
+                pending_not = True
                 continue
             negate = raw.startswith("-") and len(raw) > 1
-            if raw.upper() == "NOT":
-                # "NOT x" negates the next token; emulate by flagging through a marker term.
-                group.append(Term("\0NOT"))
-                continue
             word = raw[1:] if negate else raw
-            prefix = word.endswith("*") and len(word) > 1
+            prefix = word.endswith("*") and len(word.rstrip("*")) > 0
             term = Term(word.rstrip("*") if prefix else word, prefix=prefix, negate=negate)
         else:
             term = Term(m.group(2), phrase=True, negate=bool(m.group(1)))
         if not term.text.strip():
             continue
-        if group and group[-1].text == "\0NOT":
-            group.pop()
-            term.negate = True
+        if pending_not:
+            term.negate, pending_not = True, False
         if term.negate:
             parsed.negatives.append(term)
             continue
@@ -282,8 +356,30 @@ def parse_query(query: SearchQuery) -> ParsedQuery:
                 parsed.groups.append(group)
             group = [term]
         pending_or = False
-    if group and group[-1].text != "\0NOT":
+    if group:
         parsed.groups.append(group)
+    if pending_not:
+        parsed.notes.append("a NOT at the end of the query was ignored")
+    if not parsed.groups and not parsed.negatives:
+        # Only operators were typed ("NOT", "OR"): search them as words rather than return everything.
+        parsed.groups = [[Term(t)] for t in text.split()]
+
+    # Repeated terms count once; too many terms make a query slow without making it better.
+    seen: set[tuple[str, bool, bool]] = set()
+    groups: list[list[Term]] = []
+    for g in parsed.groups:
+        unique = []
+        for t in g:
+            if t.key not in seen:
+                seen.add(t.key)
+                unique.append(t)
+        if unique:
+            groups.append(unique)
+    parsed.groups = groups
+    parsed.negatives = list({t.key: t for t in parsed.negatives}.values())
+    count = sum(len(g) for g in parsed.groups) + len(parsed.negatives)
+    if count > MAX_TERMS:
+        raise ValueError(f"too many search terms ({count}); at most {MAX_TERMS}")
     return parsed
 
 
@@ -313,22 +409,48 @@ class SearchIndex:
         self._local = threading.local()
         self._write_lock = threading.Lock()
         self._closed = False
+        self._tempdir: tempfile.TemporaryDirectory[str] | None = None
         if path is None:
-            self._uri = f"file:atlas-search-{id(self)}?mode=memory&cache=shared"
-        else:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            self._uri = Path(path).resolve().as_uri()
-        self._keepalive = self._connect()  # keeps a shared in-memory database alive
+            # A private file rather than a shared in-memory database: that one has table-level
+            # locks, so concurrent readers and writers would see "database table is locked".
+            self._tempdir = tempfile.TemporaryDirectory(prefix="atlas-search-")
+            path = Path(self._tempdir.name) / "search.sqlite"
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._uri = Path(path).resolve().as_uri()
+        self._writer = self._connect(autocommit=True)
         self._ensure_schema()
         self.build_labels()
 
     # ------------------------------------------------------------------ storage
 
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self._uri, uri=True, check_same_thread=False, timeout=30)
+    def _connect(self, autocommit: bool = False) -> sqlite3.Connection:
+        con = sqlite3.connect(
+            self._uri, uri=True, check_same_thread=False, timeout=30, isolation_level=None if autocommit else ""
+        )
+        con.execute("PRAGMA busy_timeout=30000")
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
+        con.create_function("casefold", 1, _casefold, deterministic=True)
         return con
+
+    @contextlib.contextmanager
+    def _write(self) -> Iterator[sqlite3.Connection | None]:
+        """One write transaction, serialised across threads *and* processes (BEGIN IMMEDIATE).
+
+        Yields ``None`` once the index has been closed.
+        """
+        with self._write_lock:
+            if self._closed:
+                yield None
+                return
+            con = self._writer
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                yield con
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            con.execute("COMMIT")
 
     @property
     def _con(self) -> sqlite3.Connection:
@@ -341,12 +463,16 @@ class SearchIndex:
         # Writers run on background threads (mirror jobs); wait for the one in flight,
         # then refuse new ones - closing a connection under a running statement crashes SQLite.
         with self._write_lock:
+            if self._closed:
+                return
             self._closed = True
-            self._keepalive.close()
+            self._writer.close()
+        if self._tempdir is not None:
+            self._tempdir.cleanup()
 
     def _ensure_schema(self) -> None:
-        with self._write_lock:
-            con = self._keepalive
+        with self._write() as con:
+            assert con is not None
             con.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
             row = con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
             if row is None or int(row[0]) != SCHEMA_VERSION:
@@ -380,7 +506,6 @@ class SearchIndex:
                 "pid TEXT NOT NULL, source TEXT NOT NULL, sha TEXT NOT NULL, docs INTEGER NOT NULL, "
                 "PRIMARY KEY(pid, source))"
             )
-            con.commit()
 
     def _label_fields(self, p: PoleEntry) -> list[TextField]:
         out: list[TextField] = []
@@ -408,10 +533,9 @@ class SearchIndex:
                 rows.append((p.pid, f.kind, f.mode_index, f.ref, f.scope, f.text))
                 digest.update(f"{p.pid}\x1f{f.kind}\x1f{f.mode_index}\x1f{f.text}\x1e".encode())
         fingerprint = digest.hexdigest()
-        with self._write_lock:
-            if self._closed:
+        with self._write() as con:
+            if con is None:
                 return False
-            con = self._keepalive
             row = con.execute("SELECT value FROM meta WHERE key='labels'").fetchone()
             if row and row[0] == fingerprint and not force:
                 return False
@@ -422,7 +546,6 @@ class SearchIndex:
             con.execute("INSERT INTO labels_fts(rowid,text) SELECT id,text FROM labels")
             con.execute("INSERT INTO labels_tri(rowid,text) SELECT id,text FROM labels")
             con.execute("INSERT OR REPLACE INTO meta VALUES('labels', ?)", (fingerprint,))
-            con.commit()
         return True
 
     # ------------------------------------------------------------------ deep texts
@@ -438,10 +561,9 @@ class SearchIndex:
             for f in fields
             if f.text and f.text.strip()
         ]
-        with self._write_lock:
-            if self._closed:
+        with self._write() as con:
+            if con is None:
                 return 0
-            con = self._keepalive
             old = con.execute(
                 "SELECT sha FROM deep_sources WHERE pid=? AND source=?", (pid, source)
             ).fetchone()
@@ -458,15 +580,12 @@ class SearchIndex:
                 "INSERT OR REPLACE INTO deep_sources(pid,source,sha,docs) VALUES(?,?,?,?)",
                 (pid, source, sha, len(rows)),
             )
-            con.commit()
         return len(rows)
 
     def drop_deep(self, pid: str, source: str | None = None) -> None:
-        with self._write_lock:
-            if self._closed:
-                return
-            self._drop_deep_locked(self._keepalive, pid, source)
-            self._keepalive.commit()
+        with self._write() as con:
+            if con is not None:
+                self._drop_deep_locked(con, pid, source)
 
     @staticmethod
     def _drop_deep_locked(con: sqlite3.Connection, pid: str, source: str | None) -> None:
@@ -496,72 +615,104 @@ class SearchIndex:
     def _rows(self, sql: str, args: list[Any]) -> list[tuple[Any, ...]]:
         try:
             return self._con.execute(sql, args).fetchall()
-        except sqlite3.OperationalError:
-            return []  # an expression FTS5 cannot parse simply matches nothing
+        except sqlite3.OperationalError as exc:
+            # A text FTS5 cannot read simply matches nothing; anything else (a locked or broken
+            # database) must not pass as "no hits".
+            message = str(exc).lower()
+            if message.startswith("fts5") or "syntax error" in message or "unterminated" in message:
+                return []
+            raise
 
-    def _term_hits(self, term: Term, scopes: set[int], mode: str) -> dict[str, list[tuple[float, str, int | None, str | None, str]]]:
-        """``pid -> [(score, kind, mode_index, ref, text)]`` for one term."""
-        hits: dict[str, list[tuple[float, str, int | None, str | None, str]]] = defaultdict(list)
-        text = term.text
+    @staticmethod
+    def _tables(scopes: set[int]) -> list[tuple[str, str, list[int]]]:
         tables = []
         if SCOPE_LABELS in scopes:
             tables.append(("labels", "labels_fts", [SCOPE_LABELS]))
         deep_scopes = sorted(s for s in scopes if s != SCOPE_LABELS)
         if deep_scopes:
             tables.append(("deep", "deep_fts", deep_scopes))
+        return tables
 
-        def add(rows: Iterable[tuple[Any, ...]]) -> None:
-            for pid, kind, mode_index, ref, body, score in rows:
-                hits[pid].append((float(score) * KIND_WEIGHT.get(kind, 0.5), kind, mode_index, ref, body))
+    def _term_rows(self, term: Term, scopes: set[int], mode: str) -> dict[str, list[Row]]:
+        """Best matching text per (pole, mode, kind of text) for one term.
 
-        def words() -> None:
-            expr = _fts_literal(text) + (" *" if (term.prefix or (mode == "auto" and not term.phrase)) and len(text) >= 2 else "")
-            for table, fts, scs in tables:
+        Matching and ranking happen in SQLite and only one row per group comes
+        back - without its text, which is fetched later for the hits on screen.
+        """
+        best: dict[str, dict[tuple[int | None, str], Row]] = defaultdict(dict)
+        tables = self._tables(scopes)
+
+        def add(table: str, rows: Iterable[tuple[Any, ...]], weight: float) -> None:
+            for pid, mode_index, kind, rowid, score in rows:
+                value = float(score) * weight * KIND_WEIGHT.get(kind, 0.5)
+                key = (mode_index, kind)
+                old = best[pid].get(key)
+                if old is None or value > old[0]:
+                    best[pid][key] = (value, kind, mode_index, table, int(rowid))
+
+        def fts(expr: str, weight: float) -> None:
+            for table, index, scs in tables:
                 marks = ",".join("?" * len(scs))
                 add(
+                    table,
                     self._rows(
-                        f"SELECT d.pid,d.kind,d.mode_index,d.ref,d.text,-bm25({fts}) "
-                        f"FROM {fts} JOIN {table} d ON d.id={fts}.rowid "
-                        f"WHERE {fts} MATCH ? AND d.scope IN ({marks}) LIMIT {_MAX_ROWS_PER_TERM}",
+                        f"WITH m AS MATERIALIZED (SELECT rowid AS id, -bm25({index}) AS s FROM {index} WHERE {index} MATCH ?) "
+                        f"SELECT d.pid, d.mode_index, d.kind, d.id, MAX(m.s) FROM m JOIN {table} d ON d.id = m.id "
+                        f"WHERE d.scope IN ({marks}) GROUP BY d.pid, d.mode_index, d.kind",
                         [expr, *scs],
-                    )
+                    ),
+                    weight,
                 )
 
+        def words() -> None:
+            literal = _fts_literal(term.text)
+            if term.prefix:
+                fts(literal + " *", 1.0)
+                return
+            fts(literal, 1.0)
+            if mode == "auto" and not term.phrase and len(term.text) >= _PREFIX_MIN:
+                fts(literal + " *", _PREFIX_WEIGHT)
+
         def substring() -> None:
-            needle = text
-            like = "%" + needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            for table, _fts, scs in tables:
+            needle = term.text
+            for table, _index, scs in tables:
                 marks = ",".join("?" * len(scs))
                 if table == "labels" and len(needle) >= 3:
-                    add(
-                        self._rows(
-                            "SELECT d.pid,d.kind,d.mode_index,d.ref,d.text,1.0 "
-                            "FROM labels_tri JOIN labels d ON d.id=labels_tri.rowid "
-                            f"WHERE labels_tri MATCH ? AND d.scope IN ({marks}) LIMIT {_MAX_ROWS_PER_TERM}",
-                            [_fts_literal(needle), *scs],
-                        )
+                    # The trigram index folds case for every script.
+                    sql = (
+                        "SELECT d.pid, d.mode_index, d.kind, MIN(d.id), 1.0 FROM labels_tri JOIN labels d "
+                        f"ON d.id = labels_tri.rowid WHERE labels_tri MATCH ? AND d.scope IN ({marks}) "
+                        "GROUP BY d.pid, d.mode_index, d.kind"
                     )
-                else:
-                    add(
-                        self._rows(
-                            f"SELECT pid,kind,mode_index,ref,text,1.0 FROM {table} "
-                            f"WHERE text LIKE ? ESCAPE '\\' AND scope IN ({marks}) LIMIT {_MAX_ROWS_PER_TERM}",
-                            [like, *scs],
-                        )
+                    args: list[Any] = [_fts_literal(needle), *scs]
+                elif needle.isascii():
+                    sql = (
+                        f"SELECT pid, mode_index, kind, MIN(id), 1.0 FROM {table} WHERE text LIKE ? ESCAPE '\\' "
+                        f"AND scope IN ({marks}) GROUP BY pid, mode_index, kind"
                     )
+                    args = ["%" + needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%", *scs]
+                else:  # LIKE folds ASCII only
+                    sql = (
+                        f"SELECT pid, mode_index, kind, MIN(id), 1.0 FROM {table} WHERE instr(casefold(text), ?) > 0 "
+                        f"AND scope IN ({marks}) GROUP BY pid, mode_index, kind"
+                    )
+                    args = [_casefold(needle), *scs]
+                add(table, self._rows(sql, args), 1.0)
 
+        plain = bool(_PLAIN.fullmatch(term.text))
         if mode == "substring":
             substring()
         elif mode == "words":
-            if _WORDCHAR.search(text):
+            if _WORDCHAR.search(term.text):
                 words()
-        else:  # auto
-            if _WORDCHAR.search(text):
+        else:  # auto: words where the word index can take the text, characters otherwise
+            if plain:
                 words()
-            if not hits:
+            if not best:
+                # C++, #ff8800, U+28xx - and parts of words (anub -> Danube)
                 substring()
             # A bare L30 / E47 / N449 also means "that layer / expert / neuron".
-            m = _ID_PART.match(text) if not term.phrase else None
+            m = _ID_PART.match(term.text) if not term.phrase else None
             if m and any(m.groupdict().values()):
                 want = {k: int(v) for k, v in m.groupdict().items() if v is not None}
                 for p in self.catalog.iter_poles():
@@ -570,34 +721,54 @@ class SearchIndex:
                         and ("E" not in want or p.expert == want["E"])
                         and ("N" not in want or p.neuron == want["N"])
                     ):
-                        hits[p.pid].append((0.2, "id", None, None, p.display))
-        return hits
+                        best[p.pid].setdefault((None, "id"), (0.2, "id", None, "", 0))
+        return {pid: list(groups.values()) for pid, groups in best.items()}
 
-    def _regex_hits(self, pattern: str, scopes: set[int]) -> dict[str, list[tuple[float, str, int | None, str | None, str]]]:
+    def _regex_rows(self, pattern: str, scopes: set[int]) -> tuple[dict[str, list[Row]], Any]:
         if not self.allow_regex:
             raise ValueError("regular-expression search is switched off on this server")
         if len(pattern) > _MAX_REGEX_LENGTH:
             raise ValueError(f"regular expression longer than {_MAX_REGEX_LENGTH} characters")
         try:
-            rx = re.compile(pattern, re.IGNORECASE)
-        except re.error as exc:
-            raise ValueError(f"invalid regular expression: {exc}") from exc
-        hits: dict[str, list[tuple[float, str, int | None, str | None, str]]] = defaultdict(list)
-        deadline = time.monotonic() + 10.0
-        for table, scs in (("labels", [SCOPE_LABELS]), ("deep", sorted(s for s in scopes if s != SCOPE_LABELS))):
-            scs = [s for s in scs if s in scopes]
-            if not scs:
-                continue
+            rx = regex.compile(pattern, regex.IGNORECASE)
+        except (regex.error, OverflowError, RecursionError) as exc:
+            raise ValueError(f"invalid regular expression: {exc}") from None
+        best: dict[str, dict[tuple[int | None, str], Row]] = defaultdict(dict)
+        deadline = time.monotonic() + _REGEX_BUDGET_SECONDS
+        too_long = ValueError("the regular expression took too long; narrow the scope or simplify it")
+        for table, _index, scs in self._tables(scopes):
             marks = ",".join("?" * len(scs))
-            cur = self._con.execute(
-                f"SELECT pid,kind,mode_index,ref,text FROM {table} WHERE scope IN ({marks})", scs
-            )
-            for pid, kind, mode_index, ref, body in cur:
-                if rx.search(body):
-                    hits[pid].append((KIND_WEIGHT.get(kind, 0.5), kind, mode_index, ref, body))
-                if time.monotonic() > deadline:
-                    raise ValueError("regular-expression search took too long; narrow the scope or simplify it")
-        return hits
+            cursor = self._con.execute(f"SELECT id, pid, kind, mode_index, text FROM {table} WHERE scope IN ({marks})", scs)
+            for rowid, pid, kind, mode_index, body in cursor:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise too_long
+                try:
+                    found = rx.search(body, timeout=remaining)
+                except TimeoutError:
+                    raise too_long from None
+                if found:
+                    value = KIND_WEIGHT.get(kind, 0.5)
+                    key = (mode_index, kind)
+                    if key not in best[pid] or value > best[pid][key][0]:
+                        best[pid][key] = (value, kind, mode_index, table, rowid)
+        return {pid: list(groups.values()) for pid, groups in best.items()}, rx
+
+    def _texts(self, rows: Iterable[Row]) -> dict[tuple[str, int], tuple[str | None, str]]:
+        """``(table, rowid) -> (ref, text)`` for the given rows."""
+        wanted: dict[str, set[int]] = defaultdict(set)
+        for row in rows:
+            if row[3]:
+                wanted[row[3]].add(row[4])
+        out: dict[tuple[str, int], tuple[str | None, str]] = {}
+        for table, ids in wanted.items():
+            ordered = sorted(ids)
+            for i in range(0, len(ordered), 500):
+                chunk = ordered[i : i + 500]
+                marks = ",".join("?" * len(chunk))
+                for rowid, ref, text in self._con.execute(f"SELECT id, ref, text FROM {table} WHERE id IN ({marks})", chunk):
+                    out[(table, rowid)] = (ref, text)
+        return out
 
     # ------------------------------------------------------------------ filters
 
@@ -680,20 +851,24 @@ class SearchIndex:
 
     # ------------------------------------------------------------------ search
 
-    def search(self, query: SearchQuery | dict[str, Any] | str) -> SearchResponse:
+    def search(self, query: SearchQuery | dict[str, Any] | str, *, group_by: str | None = None) -> SearchResponse:
+        """Run a search.  ``group_by`` overrides the query's grouping, including an inline ``group:``."""
         started = time.perf_counter()
         if isinstance(query, str):
             query = SearchQuery(q=query)
         elif isinstance(query, dict):
             query = SearchQuery.model_validate(query)
-        parsed = parse_query(query)
+        parsed = parse_query(query, known=lambda did: did in self.catalog.neurons)
         q = parsed.query
+        if group_by is not None and q.group_by != group_by:
+            q = parsed.query = q.model_copy(update={"group_by": group_by})
         notes = list(parsed.notes)
         scopes = {_SCOPE_BY_NAME[s] for s in q.scope} or {SCOPE_LABELS}
 
-        # pid -> (score, matches)
         scored: dict[str, float] = {}
-        matched: dict[str, list[tuple[float, str, int | None, str | None, str]]] = defaultdict(list)
+        matched: dict[str, list[Row]] = defaultdict(list)
+        semantic_labels: dict[str, list[tuple[float, int | None, str]]] = {}
+        locate: Any = None
         has_text = bool(parsed.text)
 
         if parsed.direct:
@@ -705,15 +880,19 @@ class SearchIndex:
         elif q.match == "semantic" and has_text:
             if self.semantic is None:
                 raise ValueError("semantic search is not available on this server")
-            for pid, mode_index, score, label in self.semantic.query(parsed.text, top=2000):
-                if score <= 0:
-                    continue
-                scored[pid] = max(scored.get(pid, 0.0), float(score))
-                matched[pid].append((float(score), "mode" if mode_index is not None else "description", mode_index, None, label))
+            ranked = self.semantic.query(parsed.text, top=len(self.catalog.poles))
+            floor = max(0.05, _SEMANTIC_KEEP * ranked[0][2]) if ranked else 0.0
+            for pid, mode_index, score, label in ranked:
+                if score < floor:
+                    break
+                scored[pid] = float(score)
+                semantic_labels[pid] = [(float(score), mode_index, label)]
             if not scored:
                 notes.append("no word of the query occurs in the atlas vocabulary; try match=auto")
+            elif len(ranked) > len(scored):
+                notes.append(f"semantic search keeps poles scoring at least {_SEMANTIC_KEEP:.0%} of the best match")
         elif q.match == "regex" and has_text:
-            hits = self._regex_hits(parsed.text, scopes)
+            hits, locate = self._regex_rows(parsed.text, scopes)
             for pid, rows in hits.items():
                 scored[pid] = max(r[0] for r in rows)
                 matched[pid] = rows
@@ -721,13 +900,14 @@ class SearchIndex:
             mode = q.match
             candidate: set[str] | None = None
             for group in parsed.groups:
-                group_hits: dict[str, list[tuple[float, str, int | None, str | None, str]]] = defaultdict(list)
+                group_hits: dict[str, list[Row]] = defaultdict(list)
                 for term in group:
-                    for pid, rows in self._term_hits(term, scopes, mode).items():
+                    for pid, rows in self._term_rows(term, scopes, mode).items():
                         group_hits[pid].extend(rows)
-                pids = set(group_hits)
-                candidate = pids if candidate is None else candidate & pids
+                candidate = set(group_hits) if candidate is None else candidate & set(group_hits)
                 for pid, rows in group_hits.items():
+                    if candidate is not None and pid not in candidate:
+                        continue
                     matched[pid].extend(rows)
                     scored[pid] = scored.get(pid, 0.0) + max(r[0] for r in rows)
             if candidate is None:  # only negative terms
@@ -735,7 +915,7 @@ class SearchIndex:
                 for pid in candidate:
                     scored.setdefault(pid, 0.0)
             for term in parsed.negatives:
-                candidate -= set(self._term_hits(term, scopes, "auto" if mode == "auto" else mode))
+                candidate -= set(self._term_rows(term, scopes, mode))
             scored = {pid: s for pid, s in scored.items() if pid in candidate}
         else:
             scored = dict.fromkeys(self.catalog.poles, 0.0)
@@ -769,16 +949,16 @@ class SearchIndex:
                 return float(p.sample_rank)
             return None
 
-        if sort == "id":
-            poles.sort(key=id_key, reverse=descending)
-        else:
-            # Like the explorer: poles without a value go last in either direction.
-            with_value = [p for p in poles if value(p) is not None]
-            without = [p for p in poles if value(p) is None]
-            with_value.sort(key=id_key)
-            with_value.sort(key=lambda p: value(p), reverse=descending)  # type: ignore[arg-type,return-value]
-            without.sort(key=id_key)
-            poles = with_value + without
+        def ordered(items: list[Any], key_value: Callable[[Any], float | None], key_id: Callable[[Any], Any]) -> list[Any]:
+            """Sort by value in the requested direction; items without a value go last either way."""
+            if sort == "id":
+                return sorted(items, key=key_id, reverse=descending)
+            with_value = sorted((i for i in items if key_value(i) is not None), key=key_id)
+            with_value.sort(key=key_value, reverse=descending)  # type: ignore[arg-type]
+            without = sorted((i for i in items if key_value(i) is None), key=key_id)
+            return with_value + without
+
+        poles = ordered(poles, value, id_key)
 
         facets = None
         if q.facets:
@@ -809,21 +989,23 @@ class SearchIndex:
             response.next_offset = end if end < len(items) and chunk else None
             return chunk
 
-        def matches_of(p: PoleEntry, limit: int = 6) -> list[Match]:
-            if not q.snippets:
-                return []
+        texts: dict[tuple[str, int], tuple[str | None, str]] = {}
+
+        def load_texts(rows: Iterable[Row]) -> None:
+            if q.snippets:
+                texts.update(self._texts([r for r in rows if (r[3], r[4]) not in texts]))
+
+        def to_matches(p: PoleEntry, rows: list[Row], limit: int, skip_kind: str | None = None) -> list[Match]:
             share = {m.index: m.share for m in p.modes}
-            seen: set[tuple[str, int | None, str | None, str]] = set()
             out: list[Match] = []
-            for score, kind, mode_index, ref, body in sorted(matched.get(p.pid, ()), key=lambda r: -r[0]):
-                key = (kind, mode_index, ref, body[:80])
-                if key in seen or kind == "id":
+            for score, kind, mode_index, table, rowid in sorted(rows, key=lambda r: -r[0]):
+                if kind == "id" or kind == skip_kind or (table, rowid) not in texts:
                     continue
-                seen.add(key)
+                ref, body = texts[(table, rowid)]
                 out.append(
                     Match(
                         field=kind,
-                        text=_snippet(body, parsed),
+                        text=_snippet(body, parsed, locate),
                         mode_index=mode_index,
                         share=share.get(mode_index) if mode_index is not None else None,
                         ref=ref,
@@ -834,8 +1016,21 @@ class SearchIndex:
                     break
             return out
 
+        def matches_of(p: PoleEntry) -> list[Match]:
+            if not q.snippets:
+                return []
+            if p.pid in semantic_labels:
+                share = {m.index: m.share for m in p.modes}
+                return [
+                    Match(field="mode" if mi is not None else "description", text=label, mode_index=mi,
+                          share=share.get(mi) if mi is not None else None, score=round(sc, 4))
+                    for sc, mi, label in semantic_labels[p.pid]
+                ]  # fmt: skip
+            return to_matches(p, matched.get(p.pid, []), 6)
+
         if q.group_by == "pole":
             chunk = page(poles)
+            load_texts(r for p in chunk for r in sorted(matched.get(p.pid, ()), key=lambda r: -r[0])[:6])
             mirrored = self._mirrored([p.pid for p in chunk]) if self._mirrored else {}
             response.hits = [self.hit(p, scored.get(p.pid, 0.0), matches_of(p), mirrored.get(p.pid)) for p in chunk]
         elif q.group_by == "neuron":
@@ -843,6 +1038,7 @@ class SearchIndex:
             for p in poles:
                 order.setdefault(p.did, []).append(p)
             chunk = page(list(order.items()))
+            load_texts(r for _, ps in chunk for p in ps for r in sorted(matched.get(p.pid, ()), key=lambda r: -r[0])[:6])
             mirrored = self._mirrored([p.pid for _, ps in chunk for p in ps]) if self._mirrored else {}
             for did, ps in chunk:
                 neuron = self.catalog.neurons[did]
@@ -859,22 +1055,37 @@ class SearchIndex:
                         poles=[self.hit(p, scored.get(p.pid, 0.0), matches_of(p), mirrored.get(p.pid)) for p in ps],
                     )
                 )
-        else:  # mode
-            mode_rows: list[tuple[float, PoleEntry, int, list[tuple[float, str, int | None, str | None, str]]]] = []
+        else:  # mode: one hit per matching mode of the pole's mode list
+            mode_rows: list[tuple[float, PoleEntry, int, list[Row]]] = []
             for p in poles:
-                by_mode: dict[int, list[tuple[float, str, int | None, str | None, str]]] = defaultdict(list)
-                for row in matched.get(p.pid, ()):
-                    if row[2] is not None:
-                        by_mode[row[2]].append(row)
+                listed = {m.index for m in p.modes}
                 if has_text and not parsed.direct:
+                    by_mode: dict[int, list[Row]] = defaultdict(list)
+                    for row in matched.get(p.pid, ()):
+                        if row[2] is not None and row[2] in listed:
+                            by_mode[row[2]].append(row)
+                    for sc, mi, _label in semantic_labels.get(p.pid, ()):
+                        if mi is not None and mi in listed:
+                            by_mode[mi].append((sc, "mode", mi, "", 0))
                     for mode_index, rows in by_mode.items():
                         mode_rows.append((max(r[0] for r in rows), p, mode_index, rows))
                 else:
                     for m in p.modes:
-                        mode_rows.append((m.share or 0.0, p, m.index, []))
-            if sort in ("relevance", "share") or (has_text and sort == "id"):
-                mode_rows.sort(key=lambda r: -r[0])
+                        mode_rows.append((scored.get(p.pid, 0.0), p, m.index, []))
+
+            def mode_share(r: tuple[float, PoleEntry, int, list[Row]]) -> float | None:
+                return next((m.share for m in r[1].modes if m.index == r[2]), None)
+
+            def mode_value(r: tuple[float, PoleEntry, int, list[Row]]) -> float | None:
+                if sort == "relevance":
+                    return r[0]
+                if sort == "share":
+                    return mode_share(r)
+                return value(r[1])
+
+            mode_rows = ordered(mode_rows, mode_value, lambda r: (*id_key(r[1]), r[2]))
             chunk = page(mode_rows)
+            load_texts(row for _s, _p, _m, rows in chunk for row in sorted(rows, key=lambda r: -r[0])[:4])
             for score, p, mode_index, rows in chunk:
                 brief = next((m for m in p.modes if m.index == mode_index), None)
                 response.modes.append(
@@ -889,13 +1100,7 @@ class SearchIndex:
                         label=brief.label if brief else "",
                         share=brief.share if brief else None,
                         score=round(score, 4),
-                        matches=[
-                            Match(field=k, text=_snippet(b, parsed), mode_index=mi, ref=ref, score=round(s, 4))
-                            for s, k, mi, ref, b in sorted(rows, key=lambda r: -r[0])[:4]
-                            if k != "mode"
-                        ]
-                        if q.snippets
-                        else [],
+                        matches=to_matches(p, rows, 4, skip_kind="mode") if q.snippets else [],
                         # Modes without firings are not in the explorer's own mode list, which shifts its indices.
                         atlas_url=p.atlas_url("islands", mode_index if brief and brief.share else None),
                     )
@@ -963,19 +1168,34 @@ def pole_hit(
     )
 
 
-def _snippet(text: str, parsed: ParsedQuery, width: int = 280) -> str:
-    """The part of ``text`` around the first query term (whole text when it is short)."""
+def _casefold(value: Any) -> Any:
+    return value.casefold() if isinstance(value, str) else value
+
+
+def _snippet(text: str, parsed: ParsedQuery, locate: Any = None, width: int = 280) -> str:
+    """The part of ``text`` around the first query term (whole text when it is short).
+
+    ``locate`` is a compiled regular expression (regex searches); otherwise the
+    query's terms are looked for.
+    """
     if len(text) <= width:
         return text
-    lower = text.lower()
     pos = -1
-    for group in parsed.groups:
-        for term in group:
-            pos = lower.find(term.text.lower())
+    if locate is not None:
+        try:
+            found = locate.search(text, timeout=0.2)
+        except TimeoutError:
+            found = None
+        pos = found.start() if found else -1
+    else:
+        lower = text.casefold()
+        for group in parsed.groups:
+            for term in group:
+                pos = lower.find(term.text.casefold())
+                if pos >= 0:
+                    break
             if pos >= 0:
                 break
-        if pos >= 0:
-            break
     if pos < 0:
         return text[:width].rstrip() + " …"
     start = max(0, pos - width // 3)

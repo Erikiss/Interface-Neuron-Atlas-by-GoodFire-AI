@@ -26,10 +26,11 @@ dependencies = [
   "numpy>=1.26",
   "scikit-learn>=1.4",
   "scipy>=1.11",
+  "regex>=2023.10",
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.2"]
+mcp = ["mcp>=1.10"]
 umap = ["umap-learn>=0.5"]
 embeddings = ["fastembed>=0.4"]
 parquet = ["pyarrow>=15"]
@@ -37,9 +38,9 @@ dev = [
   "pytest>=8",
   "respx>=0.21",
   "ruff>=0.6",
-  "mcp>=1.2",
+  "mcp>=1.10",
 ]
-all = ["mcp>=1.2", "umap-learn>=0.5", "pyarrow>=15"]
+all = ["mcp>=1.10", "umap-learn>=0.5", "pyarrow>=15"]
 
 [project.scripts]
 neuron-atlas = "neuron_atlas.cli:app"
