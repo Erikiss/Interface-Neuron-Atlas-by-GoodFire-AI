@@ -40,6 +40,7 @@ import json
 import math
 import re
 import textwrap
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -270,10 +271,14 @@ class _Facts:
 
 @dataclass
 class _Items:
-    """A list.  ``markers`` (one per item, e.g. "1.") makes it a numbered list; without, bullets."""
+    """A list.  ``markers`` (one per item, e.g. "1.") makes it a numbered list; without, bullets.
+
+    ``depth`` > 0 nests the list below the item of the list before it (only the report has such lists).
+    """
 
     items: list[_Inline]
     markers: list[str] | None = None
+    depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -653,6 +658,20 @@ def _mode_number(mode: dict[str, Any], position: int) -> int:
     return int(number) if number is not None else position
 
 
+def _in_mode_list(mode: dict[str, Any], number: int) -> str:
+    """ " (mode 3 of the mode list)" for an open landscape mode that the mode list numbers differently."""
+    other = _number(mode.get("pole_mode_index"))
+    return f" (mode {int(other)} of the mode list)" if other is not None and int(other) != number else ""
+
+
+#: The landscape numbers its modes differently from the mode list; every number it prints is labelled as its own.
+_LANDSCAPE_NUMBERS = (
+    "Landscape numbers are the landscape's own: its open modes come first, numbered as in the mode list, then "
+    "every Q3/Q4 mode separately, then the unassigned bucket - from the first Q3/Q4 mode on, a landscape number "
+    "is not the number of a mode in the mode list."
+)
+
+
 def _landscape_mode_table(modes: list[dict[str, Any]], top: float | None) -> _Table:
     """One row per landscape mode with the numbers of the original Overview."""
     rows: list[list[_Cell]] = []
@@ -661,7 +680,7 @@ def _landscape_mode_table(modes: list[dict[str, Any]], top: float | None) -> _Ta
         name: _Inline = []
         if re.fullmatch(r"#[0-9a-fA-F]{3,8}", _str(m.get("colour"))):
             name.append(_Span(m["colour"], "ring" if closed else "swatch"))
-        name.append(_Span(_flat(m.get("label")) or "(unnamed)"))
+        name.append(_Span((_flat(m.get("label")) or "(unnamed)") + _in_mode_list(m, _mode_number(m, position))))
         if closed:
             name += _spans(" ", _tag("Q3/Q4"))
         if top is not None and _mode_number(m, position) == int(top):
@@ -680,7 +699,7 @@ def _landscape_mode_table(modes: list[dict[str, Any]], top: float | None) -> _Ta
                 "–" if tested is None else (f"{int(tested)} (rough)" if rough else str(int(tested))),
             ]
         )
-    head = ["#", "Mode", "Sampled share", "Of firings", "Of damage", "Damage per firing", "Tested firings"]
+    head = ["Landscape #", "Mode", "Sampled share", "Of firings", "Of damage", "Damage per firing", "Tested firings"]
     return _Table(head, rows, "llrrrrr")
 
 
@@ -724,7 +743,7 @@ def _level_blocks(levels: list[dict[str, Any]], modes: list[dict[str, Any]]) -> 
             row.append(cell)
         rows.append(row)
     names = [_flat(level.get("name")) or f"Level {i + 1}" for i, level in enumerate(levels)]
-    blocks.append(_Table(["Mode"] + names, rows, "l" + "r" * len(levels)))
+    blocks.append(_Table(["Landscape mode"] + names, rows, "l" + "r" * len(levels)))
     blocks.append(
         _note(
             "Per level: the sampled firings that fall in the mode and, in brackets, the mode's share of the "
@@ -742,7 +761,7 @@ def _matrix_table(matrix: Any, labels: list[str]) -> _Table | None:
     body: list[list[_Cell]] = []
     for label, row in zip(labels, rows, strict=False):
         body.append([label] + [("–" if _number(v) is None else f"{v:.2f}") for v in row[: len(rows)]])
-    return _Table(["Mode"] + labels[: len(rows)], body, "l" + "r" * len(rows), matrix=True)
+    return _Table(["Landscape mode"] + labels[: len(rows)], body, "l" + "r" * len(rows), matrix=True)
 
 
 def _landscape_blocks(detail: PoleDetail) -> list[_Block]:
@@ -779,9 +798,9 @@ def _landscape_blocks(detail: PoleDetail) -> list[_Block]:
         blocks.append(_landscape_mode_table(modes, _number(view.get("top_damage_mode"))))
         blocks.append(
             _note(
-                "Sampled share counts each of the five rarity levels equally (the share printed in the mode list). "
-                "“Of firings”, “of damage” and the “average damage per firing” are weighted to real text; they are "
-                "the numbers the original Overview shows."
+                _LANDSCAPE_NUMBERS + " Sampled share counts each of the five rarity levels equally (the share printed "
+                "in the mode list). “Of firings”, “of damage” and the “average damage per firing” are weighted to "
+                "real text; they are the numbers the original Overview shows."
             )
         )
     # Modes the mode list above does not describe: the landscape splits the closed-gate firings into modes of their own.
@@ -791,7 +810,8 @@ def _landscape_blocks(detail: PoleDetail) -> list[_Block]:
         relation = _flat(_dict(m.get("relation")).get("text"))
         if not (_flat(m.get("description")) or relation) or (index, label) in described:
             continue
-        spans = _spans(_b(f"Mode {index} - {label}" + (" (Q3/Q4)." if m.get("kind") == "closed_gate" else ".")))
+        lead = f"Landscape mode {index} - {label}{_in_mode_list(m, index)}"
+        spans = _spans(_b(lead + (" (Q3/Q4)." if m.get("kind") == "closed_gate" else ".")))
         for sentence in (_overview_numbers(m), relation):
             if sentence:
                 spans.append(_Span(f" {sentence}."))
@@ -813,7 +833,12 @@ def _landscape_blocks(detail: PoleDetail) -> list[_Block]:
         blocks.append(_para(text + "; untested firings are estimated from strength and mode."))
     order = [str(int(i)) for i in _list(view.get("mode_order")) if _number(i) is not None]
     if order:
-        blocks.append(_para(f"Order of the lanes in the original picture (similar modes side by side): {', '.join(order)}."))
+        blocks.append(
+            _para(
+                "Order of the lanes in the original picture (similar modes side by side), by landscape number: "
+                f"{', '.join(order)}."
+            )
+        )
     labels = [str(_mode_number(m, position)) for position, m in enumerate(modes)]
     for key, title in (("by_description", "by description"), ("by_firing", "by firing")):
         table = _matrix_table(_dict(view.get("mode_similarity")).get(key), labels)
@@ -1056,8 +1081,15 @@ def _one_subcircuit(s: Subcircuit, pole: str, labels: dict[int, str], names: dic
     return blocks
 
 
+#: Characters of a member neuron's label that a document shows; the whole label stays in the JSON of the circuit.
+_MEMBER_LABEL_CHARS = 120
+
+
 def _member_item(member: dict[str, Any]) -> _Inline:
-    """ "L18_E253_N170 (+0.0164) - label", plus the member's pole and distance where the data has them."""
+    """ "L18_E253_N170 (+0.0164) - label", plus the member's pole and distance where the data has them.
+
+    The label is cut to its first words: member labels run to 500 characters and a circuit lists hundreds.
+    """
     spans = _spans(_code(_str(member.get("unit")) or "?"))
     numbers = []
     if member.get("pole") in ("pos", "neg"):
@@ -1069,42 +1101,78 @@ def _member_item(member: dict[str, Any]) -> _Inline:
     if numbers:
         spans.append(_Span(f" ({', '.join(numbers)})"))
     if _flat(member.get("label")):
-        spans.append(_Span(" - " + _flat(member.get("label"))))
+        spans.append(_Span(" - " + _short(member.get("label"), _MEMBER_LABEL_CHARS)))
     if member.get("in_atlas") is True:
         spans += _spans(" ", _tag("in the atlas"))
     return spans
 
 
-def _group_blocks(group: dict[str, Any], reader: bool) -> list[_Block]:
-    """One named input or reader group of the circuit with its member neurons."""
-    lead = " - ".join(part for part in (_flat(group.get("id")), _flat(group.get("name"))) if part) or "Group"
+def _reader_effect(group: dict[str, Any]) -> str:
+    """What a reader group does on this pole, in words.
+
+    ``effect`` is the label the explorer shows.  For a group whose home is the
+    other pole it is that pole's label, and ``measured_direction`` (set exactly
+    then) says what the measurement on this pole found instead.
+    """
     effect = _flat(group.get("effect"))
-    facts = []
-    if reader:
-        facts.append({"+": "raised by this pole", "-": "lowered by this pole"}.get(effect, effect))
-        if _number(group.get("examples")) is not None:
-            facts.append(f"seen in {_plural(int(group['examples']), 'example')}")
-        if _number(group.get("mean_effect")) is not None:
-            facts.append(f"mean effect {_num(group.get('mean_effect'), sign=True)}")
-        if _flat(group.get("measured_direction")):
-            facts.append(f"measured on this pole: {_flat(group.get('measured_direction'))}")
-    else:
-        facts.append(_flat(group.get("role")))
-        facts.append({"+": "net effect positive", "-": "net effect negative"}.get(effect, effect))
-        facts.append(f"lane: {_flat(group.get('lane'))}" if _flat(group.get("lane")) else "")
-        for key in ("gate", "up"):
-            if _number(group.get(key)) is not None:
-                facts.append(f"{key} {_num(group.get(key), sign=True)}")
-        if _number(group.get("share")) is not None:
-            facts.append(f"share {_pct(group.get('share'))}")
+    shown = {"+": "raised", "-": "lowered"}.get(effect, effect)
+    measured = _flat(group.get("measured_direction"))
+    if measured:
+        return f"shown as “{shown}” in the explorer (the label of the other pole) · measured on this pole: {measured}"
+    return f"{shown} by this pole" if effect in ("+", "-") else shown
+
+
+def _group_tables(inputs: list[dict[str, Any]], readers: list[dict[str, Any]], level: int) -> list[_Block]:
+    """Every input and reader group at a glance, one row each (before any member list)."""
+    blocks: list[_Block] = []
+    if inputs:
+        rows: list[list[_Cell]] = []
+        for g in inputs:
+            rows.append(
+                [
+                    _flat(g.get("id")) or "–", _flat(g.get("name")) or "–", _flat(g.get("role")) or "–",
+                    _flat(g.get("lane")) or "–", _num(g.get("gate"), sign=True), _num(g.get("up"), sign=True),
+                    _pct(g.get("share")), _count(g.get("n_members")),
+                ]  # fmt: skip
+            )
+        blocks.append(_Heading(level + 1, "Inputs", anchor="circuit-inputs"))
+        blocks.append(
+            _note(
+                "Groups of earlier neurons. Gate drivers open the gate and gate opposers close it; up drivers raise "
+                "the value the neuron writes and up opposers lower it. Gate and up: the group's summed contribution "
+                "to each signal."
+            )
+        )
+        blocks.append(_Table(["Group", "Name", "Role", "Lane", "Gate", "Up", "Share", "Neurons"], rows, "llllrrrr"))
+    if readers:
+        rows = []
+        for g in readers:
+            rows.append(
+                [
+                    _flat(g.get("id")) or "–", _flat(g.get("name")) or "–", _reader_effect(g) or "–",
+                    _count(g.get("examples")), _num(g.get("mean_effect"), sign=True), _count(g.get("n_members")),
+                ]  # fmt: skip
+            )
+        blocks.append(_Heading(level + 1, "Readers", anchor="circuit-readers"))
+        blocks.append(
+            _note(
+                "Groups of later neurons that use the neuron's output: the effect of this pole on them, the examples "
+                "in which it showed and its mean."
+            )
+        )
+        blocks.append(_Table(["Group", "Name", "Effect", "Examples", "Mean effect", "Neurons"], rows, "lllrrr"))
+    return blocks
+
+
+def _group_details(group: dict[str, Any]) -> list[_Block]:
+    """One input or reader group with its description and member neurons (its numbers are in the table)."""
+    lead = " - ".join(part for part in (_flat(group.get("id")), _flat(group.get("name"))) if part) or "Group"
     members = _dicts(group.get("members"))
+    spans = _spans(_b(lead + "."))
     n_members = _number(group.get("n_members"))
     if n_members is not None:
         listed = f", {len(members)} listed" if members and len(members) != int(n_members) else ""
-        facts.append(_plural(int(n_members), "neuron") + listed)
-    spans = _spans(_b(lead + "."))
-    if any(facts):
-        spans.append(_Span(" " + " · ".join(fact for fact in facts if fact) + "."))
+        spans.append(_Span(f" {_plural(int(n_members), 'neuron')}{listed}."))
     if _flat(group.get("description")):
         spans.append(_Span(" " + _flat(group.get("description"))))
     blocks: list[_Block] = [_Para(spans)]
@@ -1120,52 +1188,65 @@ def _group_blocks(group: dict[str, Any], reader: bool) -> list[_Block]:
     return blocks
 
 
-def _circuit_blocks(
-    circuit: Any, pole: str = "pos", level: int = 1, *, title: str = "Circuit", anchor: str = "circuit"
-) -> list[_Block]:
-    """The Circuit view: who drives the neuron, who reads it, which output tokens it moves."""
+def _circuit_parts(
+    circuit: Any, pole: str = "pos", level: int = 1, *, title: str = "Circuit", anchor: str = "circuit",
+    continued: str = "",
+) -> tuple[list[_Block], list[_Block]]:  # fmt: skip
+    """The Circuit view in two parts: (overview, details).
+
+    The overview - the neuron's line, every input and reader group as a table
+    row, the output tokens - stays short, so that a shortened document keeps it.
+    The details follow: each group's description and member neurons, then the
+    strongest contexts.  ``continued`` heads the details with a heading of their
+    own (when other sections come between the two parts).
+    """
     view = _dict(circuit)
     inputs, readers = _dicts(view.get("inputs")), _dicts(view.get("readers"))
     tokens = _dicts(view.get("output_tokens"))
     contexts = [c for c in _dicts(view.get("strongest_contexts")) if _clean(c.get("text")).strip()]
     notes = [_flat(n) for n in _list(view.get("notes")) if _flat(n)]
     if not (inputs or readers or tokens or contexts or notes or _flat(view.get("line"))):
-        return []
-    blocks: list[_Block] = [_Heading(level, title, anchor=anchor)]
-    blocks += _prose(view.get("line"))
+        return [], []
+    overview: list[_Block] = [_Heading(level, title, anchor=anchor)]
+    overview += _prose(view.get("line"))
     facts = []
     if _number(view.get("examples_analysed")) is not None:
         facts.append(f"{_plural(int(view['examples_analysed']), 'example')} analysed")
     if _number(view.get("threshold")) is not None:
-        facts.append(f"threshold {_num(view.get('threshold'), 4)}")
+        facts.append(f"threshold of the circuit data {_num(view.get('threshold'), 4)} (not the pole's θ)")
     if facts:
-        blocks.append(_Para(_joined(facts), "note"))
+        overview.append(_Para(_joined(facts), "note"))
     if notes:
-        blocks.append(_Items([_spans(n) for n in notes]))
-    if inputs:
-        blocks.append(_Heading(level + 1, "Inputs", anchor="circuit-inputs"))
-        blocks.append(
-            _note(
-                "Groups of earlier neurons. Gate drivers open the gate and gate opposers close it; up drivers raise "
-                "the value the neuron writes and up opposers lower it. Attribution of each neuron in brackets."
-            )
-        )
-        for group in inputs:
-            blocks += _group_blocks(group, reader=False)
-    if readers:
-        blocks.append(_Heading(level + 1, "Readers", anchor="circuit-readers"))
-        blocks.append(_note("Groups of later neurons that use the neuron's output. Attribution of each neuron in brackets."))
-        for group in readers:
-            blocks += _group_blocks(group, reader=True)
+        overview.append(_Items([_spans(n) for n in notes]))
+    overview += _group_tables(inputs, readers, level)
     if tokens:
-        blocks.append(_Heading(level + 1, "Output tokens", anchor="circuit-output"))
-        blocks.append(_note("The vocabulary tokens whose logits the neuron pushes most on this pole (weight in brackets)."))
-        blocks.append(_Para(_output_tokens(tokens)))
+        overview.append(_Heading(level + 1, "Output tokens", anchor="circuit-output"))
+        overview.append(_note("The vocabulary tokens whose logits the neuron pushes most on this pole (weight in brackets)."))
+        overview.append(_Para(_output_tokens(tokens)))
+
+    details: list[_Block] = []
+    members = (
+        "Each group with its description and its strongest member neurons; attribution in brackets, labels shortened "
+        "(the full labels are in the JSON data)."
+    )
+    for groups, name, where in ((inputs, "Input groups in detail", "inputs"), (readers, "Reader groups in detail", "readers")):
+        if any(_flat(g.get("description")) or _dicts(g.get("about")) or _dicts(g.get("members")) for g in groups):
+            details += [_Heading(level + 1, name, anchor=f"circuit-{where}-detail"), _note(members)]
+            for group in groups:
+                details += _group_details(group)
     if contexts:
-        blocks.append(_Heading(level + 1, "Strongest contexts", anchor="circuit-contexts"))
+        details.append(_Heading(level + 1, "Strongest contexts", anchor="circuit-contexts"))
         examples = [Example(source="circuit", text=_str(c.get("text")), act=_number(c.get("activation"))) for c in contexts]
-        blocks += _passages(examples, pole, label=False)
-    return blocks
+        details += _passages(examples, pole, label=False)
+    if details and continued:
+        details.insert(0, _Heading(level, continued, anchor=f"{anchor}-detail"))
+    return overview, details
+
+
+def _circuit_blocks(circuit: Any, pole: str = "pos") -> list[_Block]:
+    """The Circuit view of a pole document: who drives the neuron, who reads it, which output tokens it moves."""
+    overview, details = _circuit_parts(circuit, pole)
+    return overview + details
 
 
 def _island_blocks(detail: PoleDetail) -> list[_Block]:
@@ -1195,7 +1276,9 @@ def _island_blocks(detail: PoleDetail) -> list[_Block]:
         blocks.append(_note(f"Share: {share}."))
     for island in view.islands:
         title = _flat(island.name) or "(unnamed island)"
-        blocks.append(_Heading(2, title, kicker=f"Island {island.number}", anchor=f"island-{island.number}"))
+        # Numbered from 1 as on goodfire.com; the references of its examples (island0:0, ...) use the id.
+        kicker = f"Island {island.number} (id island{island.id})"
+        blocks.append(_Heading(2, title, kicker=kicker, anchor=f"island-{island.number}"))
         if island.n is not None:
             shown = f"; {len(island.examples)} shown" if island.examples else ""
             blocks.append(_note(f"{_plural(island.n, 'example')} in the cluster{shown}."))
@@ -1283,11 +1366,36 @@ _MD_INLINE = re.compile(
 #: What would turn a line into a heading, quote, list item or rule.
 _MD_START = re.compile(r"^[ \t]*(#{1,6}(?=[ \t]|$)|>|[-+](?=[ \t]|$)|\d{1,9}(?=[.)](?:[ \t]|$))|(?:=+|-{2,})[ \t]*$)", re.M)
 _BACKTICKS = re.compile(r"`+")
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-_ATX = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*$")
+#: A line that opens a fenced code block, as CommonMark reads it: up to three spaces, then three or more
+#: backticks (the rest of the line may hold no backtick) or tildes; then the info string.
+_FENCE = re.compile(r"^( {0,3})(`{3,}(?=[^`]*$)|~{3,})(.*)$")
+#: A line that can close a fenced code block: the fence alone, followed by nothing but spaces.
+_FENCE_END = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+_ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*))?$")  # the text keeps trailing blanks: see _atx_text
 _SETEXT = re.compile(r"^ {0,3}(=+|-{2,})[ \t]*$")
 _PLAIN_LINE = re.compile(r"^ {0,3}(?![-*+>|#]|\d+[.)])\S")
-_CODE_OR_LT = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)|<(?=[A-Za-z/!?])")
+_QUOTE_LINE = re.compile(r"^ {0,3}>")
+#: In a line of the report, what could reach beyond the report once rendered: "<" that opens HTML or an
+#: autolink, "]:" that defines a link for the whole document, "![" that loads a remote image, and "](" that
+#: links anywhere but to a web or mail address.  Only characters that no backslash escapes yet count.
+_REPORT_UNSAFE = re.compile(
+    r"(?<!\\)((?:\\\\)*)(<(?=[A-Za-z/!?])|\](?=:)|!(?=\[)|\](?=\()(?!\([ \t]*(?i:https?://|mailto:)))"
+)
+
+
+def _fence_closes(line: str, fence: str) -> bool:
+    """True when ``line`` ends a code block opened with ``fence``: the same character, at least as many."""
+    end = _FENCE_END.match(line)
+    return bool(end) and end.group(1)[0] == fence[0] and len(end.group(1)) >= len(fence)
+
+
+def _atx_text(match: re.Match[str]) -> str:
+    """The text of an ATX heading without its closing "#" sequence (trimmed in Python: a regex would backtrack)."""
+    text = (match.group(2) or "").rstrip(" \t")
+    head = text.rstrip("#")
+    if head != text and (not head or head[-1] in " \t"):
+        text = head
+    return text.strip(" \t")
 
 
 def _md(text: str) -> str:
@@ -1336,7 +1444,7 @@ def _md_inline(spans: _Inline, cell: bool = False) -> str:
             continue
         text = _md(_clean(span.text).replace("\n", " "))
         if span.style == "tag":
-            text = f"[{text}]"
+            text = f"\\[{text}\\]"  # escaped: no link definition anywhere can turn the tag into a link
         elif span.style == "link":
             url = _url(span.href)
             text = (f"<{url}>" if _flat(span.text) == _flat(span.href) else f"[{text}]({url})") if url else text
@@ -1349,15 +1457,50 @@ def _md_inline(spans: _Inline, cell: bool = False) -> str:
     return line.replace("|", "\\|") if cell else _MD_START.sub(_md_line_start, line)
 
 
+def _dedent(line: str, indent: int) -> str:
+    """``line`` without up to ``indent`` leading spaces (how CommonMark takes the lines of an indented fence)."""
+    return line[min(indent, len(line) - len(line.lstrip(" "))) :]
+
+
+def _until_blank_end(lines: list[str]) -> list[str]:
+    """``lines`` without the blank lines at the end (of a code block the report leaves open)."""
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    return lines[:end]
+
+
+def _report_code(lines: list[str], info: str) -> str:
+    """A fenced block of the report, written again at the start of the line with a fence nothing inside can close."""
+    words = info.split()
+    language = re.sub(r"[^\w.+#-]", "", words[0])[:40] if words else ""
+    fence = "`" * max(3, max((len(run) for run in _BACKTICKS.findall("\n".join(lines))), default=0) + 1)
+    return "\n".join([fence + language, *lines, fence])
+
+
 def _demoted_report(markdown: str, top: int) -> str:
     """The scientist's Markdown with its headings moved down so that the highest one lands on level ``top``.
 
-    Everything else stays as written, except that "<" outside code is escaped so
-    that no HTML can come alive when the document is rendered.
+    The report is written to be read (goodfire.com shows it as plain text), so it
+    stays as written except where it could reach beyond itself once the document
+    is rendered.  Fenced code blocks are found as CommonMark finds them and written
+    again with a fence of their own at the start of the line, so that nothing in
+    them can end them early and a block left open at the end is closed.  Outside
+    them, "<" that could open HTML is escaped, and so are link definitions (they
+    would apply to the whole document), images (a remote request) and links to
+    anything but web and mail addresses.  A line that starts with ">" inside a
+    paragraph (a wrapped "A > B > C" chain) stays text instead of opening a quote.
     """
-    fence = ""
-    kinds: list[tuple[str, int, str]] = []  # (kind, heading level, text)
+    kinds: list[tuple[str, int, str]] = []  # (kind, heading level, text); "code" holds a whole block
+    fence, info, indent, code = "", "", 0, []
     for line in _clean(markdown).split("\n"):
+        if fence:
+            if _fence_closes(line, fence):
+                kinds.append(("code", 0, _report_code(code, info)))
+                fence = ""
+            else:
+                code.append(_dedent(line, indent))
+            continue
         opened = _FENCE.match(line)
         # A one-line paragraph followed by === or --- is a heading too ("setext" style).
         underlined = (
@@ -1365,33 +1508,37 @@ def _demoted_report(markdown: str, top: int) -> str:
             and kinds
             and kinds[-1][0] == "text"
             and _PLAIN_LINE.match(kinds[-1][2])
-            and not (len(kinds) > 1 and kinds[-2][2].strip())
+            and not (len(kinds) > 1 and kinds[-2][0] == "text" and kinds[-2][2].strip())
         )
-        if fence:
-            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence):
-                fence = ""
-            kinds.append(("code", 0, line))
-        elif opened:
-            fence = opened.group(1)
-            kinds.append(("code", 0, line))
+        if opened:
+            indent, fence, info, code = len(opened.group(1)), opened.group(2), opened.group(3), []
         elif atx := _ATX.match(line):
-            kinds.append(("heading", len(atx.group(1)), re.sub(r"[ \t]+#+$", "", atx.group(2))))
+            kinds.append(("heading", len(atx.group(1)), _atx_text(atx)))
         elif underlined:
             kinds[-1] = ("heading", 1 if line.lstrip().startswith("=") else 2, kinds[-1][2].strip())
         else:
             kinds.append(("text", 0, line))
+    if fence:  # the report ends inside a code block
+        kinds.append(("code", 0, _report_code(_until_blank_end(code), info)))
     levels = [level for kind, level, _ in kinds if kind == "heading"]
     shift = top - min(levels) if levels else 0
     out = []
+    previous = ""  # the text line before, "" after a blank line, a heading or a code block
     for kind, level, text in kinds:
         if kind == "code":
             out.append(text)
+            previous = ""
             continue
-        text = _CODE_OR_LT.sub(lambda m: "\\<" if m.group(0) == "<" else m.group(0), text)
+        escaped = _REPORT_UNSAFE.sub(r"\1\\\2", text)
         if kind == "heading":
             level += shift
-            text = f"{'#' * level} {text}" if level <= 6 else f"**{text}**"
-        out.append(text)
+            escaped = f"{'#' * level} {escaped}" if level <= 6 else (f"**{escaped}**" if escaped else "")
+            previous = ""
+        else:
+            if previous.strip() and not _QUOTE_LINE.match(previous):
+                escaped = re.sub(r"^(\s*)>", r"\1\\>", escaped)
+            previous = text
+        out.append(escaped)
     return "\n".join(out).strip("\n")
 
 
@@ -1457,16 +1604,23 @@ def _to_markdown(blocks: Sequence[_Block], heading: int = 1) -> str:
 
 # --------------------------------------------------------------------------- the scientist's report, parsed
 
+#: Inline marks of the report.  A mark spans at most 2,000 characters, and code starts only at the first
+#: backtick of a run (as in CommonMark), so that marks without a partner cost linear time, not quadratic.
 _REPORT_SPAN = re.compile(
-    r"(?P<tick>`+)(?!`)(?P<code>.+?)(?<!`)(?P=tick)(?!`)"
-    r"|\*\*(?=\S)(?P<b>.+?)(?<=\S)\*\*"
-    r"|(?<![*\w])\*(?=[^\s*])(?P<i>[^*]+?)(?<=[^\s*])\*(?![*\w])"
+    r"(?<!`)(?P<tick>`+)(?!`)(?P<code>.{1,2000}?)(?<!`)(?P=tick)(?!`)"
+    r"|\*\*(?=\S)(?P<b>.{1,2000}?)(?<=\S)\*\*"
+    r"|(?<![*\w])\*(?=[^\s*])(?P<i>[^*]{1,2000}?)(?<=[^\s*])\*(?![*\w])"
 )
-_REPORT_ITEM = re.compile(r"^\s*(\d{1,9}[.)]|[-*+])[ \t]+(.*)$")
+#: Paragraphs longer than this keep their marks as literal text (real ones stay far below it).
+_REPORT_INLINE_LIMIT = 20_000
+#: A list item: indentation, marker, the blanks after the marker, text.
+_REPORT_ITEM = re.compile(r"^([ \t]*)(\d{1,9}[.)]|[-*+])([ \t]+)(.*)$")
 
 
 def _report_inline(text: str) -> _Inline:
     """Inline Markdown of the report: code, **strong** and *emphasis*; everything else stays literal."""
+    if len(text) > _REPORT_INLINE_LIMIT:
+        return [_Span(text)]
     spans: _Inline = []
     position = 0
     for match in _REPORT_SPAN.finditer(text):
@@ -1488,14 +1642,16 @@ def _report_blocks(markdown: str, top: int) -> list[_Block]:
     """The report as blocks for the text and HTML writers (which have no Markdown renderer to lean on).
 
     Understands what the reports use: headings, paragraphs, bullet and numbered
-    lists, fenced code, and the inline marks of :func:`_report_inline`.  Anything
-    else is kept as literal text, so nothing is lost.
+    lists (nested ones by their indentation), fenced code, and the inline marks of
+    :func:`_report_inline`.  Anything else is kept as literal text, so nothing is lost.
     """
     blocks: list[_Block] = []
     paragraph: list[str] = []
     items: list[tuple[str, list[str]]] = []
+    depth = 0  # nesting depth of the list items being collected
+    columns: list[int] = []  # where the text of each enclosing list item starts, outermost first
     code: list[str] | None = None
-    fence = ""
+    fence, indent = "", 0
     lines = _clean(markdown).split("\n")
     levels = [len(m.group(1)) for m in map(_ATX.match, lines) if m]
     shift = top - min(levels) if levels else 0
@@ -1505,41 +1661,55 @@ def _report_blocks(markdown: str, top: int) -> list[_Block]:
             blocks.append(_Para(_report_inline(" ".join(paragraph))))
             paragraph.clear()
         if items:
-            numbered = all(marker[0].isdigit() for marker, _ in items)
+            numbered = items[0][0][0].isdigit()
             content = [_report_inline(" ".join(text)) for _, text in items]
-            blocks.append(_Items(content, [marker for marker, _ in items] if numbered else None))
+            blocks.append(_Items(content, [marker for marker, _ in items] if numbered else None, depth))
             items.clear()
 
+    def width(blank: str) -> int:
+        return len(blank.expandtabs(4))
+
     for line in lines:
-        opened = _FENCE.match(line)
         if code is not None:
-            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence):
+            if _fence_closes(line, fence):
                 blocks.append(_Verbatim("\n".join(code), "text"))
                 code = None
             else:
-                code.append(line)
+                code.append(_dedent(line, indent))
             continue
+        opened = _FENCE.match(line)
         if opened:
             flush()
-            code, fence = [], opened.group(1)
+            columns.clear()
+            code, fence, indent = [], opened.group(2), len(opened.group(1))
             continue
         heading, item = _ATX.match(line), _REPORT_ITEM.match(line)
         if heading:
             flush()
-            title = re.sub(r"[ \t]+#+$", "", heading.group(2))
-            blocks.append(_Heading(len(heading.group(1)) + shift, title))
+            columns.clear()
+            blocks.append(_Heading(len(heading.group(1)) + shift, _atx_text(heading)))
         elif not line.strip():
             flush()
         elif item:
-            if paragraph:
+            # An item belongs inside every earlier item whose text starts at or before its marker.
+            column, marker = width(item.group(1)), item.group(2)
+            while columns and column < columns[-1]:
+                columns.pop()
+            if paragraph or (items and (len(columns) != depth or marker[0].isdigit() != items[0][0][0].isdigit())):
                 flush()
-            items.append((item.group(1), [item.group(2).strip()]))
+            depth = len(columns)
+            blanks = width(item.group(3))
+            columns.append(column + len(marker) + (blanks if blanks <= 4 else 1))
+            items.append((marker, [item.group(4).strip()]))
         elif items:
             items[-1][1].append(line.strip())
         else:
+            if not paragraph:  # a new paragraph: it ends the lists it is not indented into
+                while columns and width(line[: len(line) - len(line.lstrip())]) < columns[-1]:
+                    columns.pop()
             paragraph.append(line.strip())
     if code is not None:
-        blocks.append(_Verbatim("\n".join(code), "text"))
+        blocks.append(_Verbatim("\n".join(_until_blank_end(code)), "text"))
     flush()
     return blocks
 
@@ -1574,8 +1744,49 @@ def _wrap(text: str, width: int = _TEXT_WIDTH, first: str = "", rest: str = "") 
     ) or [first.rstrip()]
 
 
+def _char_width(char: str) -> int:
+    """Columns a character takes in a monospaced font: East Asian wide ones two, combining marks none."""
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in "WF" else 1
+
+
+def _width(text: str) -> int:
+    """Columns ``text`` takes in a monospaced font (``len`` for most text; CJK and emoji count two)."""
+    return len(text) if text.isascii() else sum(map(_char_width, text))
+
+
+def _wrap_cell(text: str, width: int) -> list[str]:
+    """A table cell wrapped to ``width`` columns; words longer than that are broken."""
+    if _width(text) == len(text):
+        return textwrap.wrap(text, width) or [""]
+    lines: list[str] = []
+    line = ""
+    for word in text.split():
+        joined = f"{line} {word}" if line else word
+        if _width(joined) <= width:
+            line = joined
+            continue
+        if line:
+            lines.append(line)
+        while _width(word) > width:
+            used = cut = 0
+            for char in word:
+                if used + _char_width(char) > width and cut:
+                    break
+                used += _char_width(char)
+                cut += 1
+            lines.append(word[:cut])
+            word = word[cut:]
+        line = word
+    return lines + [line] if line else lines or [""]
+
+
 def _text_table(table: _Table) -> list[str]:
-    """A table as aligned columns; cells wrap inside their column so that the table fits the page."""
+    """A table as aligned columns; cells wrap inside their column so that the table fits the page.
+
+    Columns are measured in display columns, so that rows with CJK text line up with the others.
+    """
 
     def cell(value: _Cell) -> str:
         if isinstance(value, _Bar):
@@ -1585,10 +1796,10 @@ def _text_table(table: _Table) -> list[str]:
     columns = len(table.head)
     rows = [[cell(c) for c in row[:columns]] + [""] * (columns - len(row)) for row in table.rows]
     aligns = (table.align + "l" * columns)[:columns]
-    body = [max([len(row[i]) for row in rows], default=0) for i in range(columns)]
-    widths = [max(len(table.head[i]), body[i]) for i in range(columns)]
+    body = [max([_width(row[i]) for row in rows], default=0) for i in range(columns)]
+    widths = [max(_width(table.head[i]), body[i]) for i in range(columns)]
     # Too wide for the page: first let headers wrap down to their longest word, then narrow the widest column.
-    floor = [max([body[i]] + [len(word) for word in table.head[i].split()]) for i in range(columns)]
+    floor = [max([body[i]] + [_width(word) for word in table.head[i].split()]) for i in range(columns)]
     budget = _TEXT_WIDTH - 2 * (columns - 1)
     while sum(widths) > budget and widths != floor:
         slack = [widths[i] - floor[i] for i in range(columns)]
@@ -1597,13 +1808,14 @@ def _text_table(table: _Table) -> list[str]:
         widths[widths.index(max(widths))] -= 1
 
     def layout(cells: list[str]) -> list[str]:
-        wrapped = [textwrap.wrap(c, widths[i]) or [""] for i, c in enumerate(cells)]
+        wrapped = [_wrap_cell(c, widths[i]) for i, c in enumerate(cells)]
         lines = []
         for k in range(max(len(w) for w in wrapped)):
             parts = []
             for i, w in enumerate(wrapped):
                 part = w[k] if k < len(w) else ""
-                parts.append(part.rjust(widths[i]) if aligns[i] == "r" else part.ljust(widths[i]))
+                pad = " " * max(0, widths[i] - _width(part))
+                parts.append(pad + part if aligns[i] == "r" else part + pad)
             lines.append("  ".join(parts).rstrip())
         return lines
 
@@ -1635,7 +1847,7 @@ def _text_heading(block: _Heading) -> list[str]:
     if block.level == 1:
         title = title.upper()
     lines = _wrap(title)
-    rule = max(len(line) for line in lines)
+    rule = max(_width(line) for line in lines)
     if block.level == 0:
         return ["=" * rule, *lines, "=" * rule]
     if block.level <= 3:
@@ -1646,6 +1858,7 @@ def _text_heading(block: _Heading) -> list[str]:
 def _to_text(blocks: Sequence[_Block]) -> str:
     """Blocks as plain text: no markup, prose wrapped, passages untouched."""
     out: list[str] = []
+    previous: _Block | None = None
     for block in blocks:
         if isinstance(block, _Heading):
             lines = _text_heading(block)
@@ -1656,10 +1869,13 @@ def _to_text(blocks: Sequence[_Block]) -> str:
         elif isinstance(block, _Facts):
             lines = _wrap(" · ".join(phrase for _, _, phrase in block.items))
         elif isinstance(block, _Items):
+            if isinstance(previous, _Items) and (block.depth or previous.depth) and out and not out[-1]:
+                out.pop()  # a nested list hangs on the item before it, and the outer list goes on after it
             markers = block.markers or ["-"] * len(block.items)
             lines = []
+            pad = "  " + "   " * block.depth
             for marker, item in zip(markers, block.items, strict=False):
-                lines += _wrap(_plain(item), first=f"  {marker} ", rest=" " * (len(marker) + 3))
+                lines += _wrap(_plain(item), first=f"{pad}{marker} ", rest=" " * (len(pad) + len(marker) + 1))
         elif isinstance(block, _Table):
             lines = _text_table(block)
         elif isinstance(block, _Passage):
@@ -1671,13 +1887,20 @@ def _to_text(blocks: Sequence[_Block]) -> str:
         else:
             lines = _to_text(_report_blocks(block.markdown, block.level)).rstrip("\n").split("\n")
         out += [*lines, ""]
+        previous = block
     return "\n".join(out).strip("\n") + "\n"
 
 
 # --------------------------------------------------------------------------- HTML writer
 
 _FOCAL_MARK = re.compile(r"«[^«»]{0,80}»")
-_HTML_STYLES = {"b": "<strong>{}</strong>", "i": "<em>{}</em>", "tag": '<span class="tag">{}</span>'}
+#: Text in class "cp" is copied with a selection but not shown: the brackets of a tag chip, the separator before
+#: the reference of an example - so that copied text reads as the Markdown and plain-text documents do.
+_HTML_STYLES = {
+    "b": "<strong>{}</strong>",
+    "i": "<em>{}</em>",
+    "tag": '<span class="tag"><span class="cp">[</span>{}<span class="cp">]</span></span>',
+}
 
 _CSS = """
 :root{--pole:224,86,27;--other:51,105,138;--ink:#1c1b19;--soft:#55524c;--muted:#7a766e;--rule:#dcd8cf;--wash:#f6f4ef;
@@ -1689,7 +1912,7 @@ body.neg{--pole:51,105,138;--other:224,86,27}
 html{font-size:17px;-webkit-text-size-adjust:100%}
 body{margin:0;background:#fff;color:var(--ink);font-family:var(--serif);line-height:1.52;
 -webkit-print-color-adjust:exact;print-color-adjust:exact;text-rendering:optimizeLegibility}
-main{max-width:47rem;margin:0 auto;padding:1.6rem 1.3rem 4rem}
+main{max-width:47rem;margin:0 auto;padding:1.6rem 1.3rem 4rem;overflow-wrap:anywhere}
 section{scroll-margin-top:3rem}
 nav.bar{position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;gap:.2rem 1rem;align-items:center;
 padding:.45rem 1.3rem;background:rgba(255,255,255,.94);border-bottom:1px solid var(--rule);
@@ -1714,6 +1937,7 @@ p.label{font-family:var(--sans);font-size:.72rem;letter-spacing:.06em;text-trans
 margin:1rem 0 .3rem}
 a{color:#1d5a7a}
 ul,ol{margin:.45rem 0 .8rem;padding-left:1.25rem}
+ul.sub,ol.sub{margin-top:-.6rem}
 li{margin:.2rem 0}
 section.s2 li{font-size:.9rem;line-height:1.42}
 code{font-family:var(--mono);font-size:.84em;background:var(--wash);padding:.05em .3em;border-radius:3px;
@@ -1732,7 +1956,8 @@ thead{display:table-header-group}
 .r{text-align:right}
 td.r{white-space:nowrap}
 .meter{display:inline-block;width:4.2rem;height:.5rem;margin-right:.5rem;background:#ebe8e1;border-radius:2px;overflow:hidden}
-.meter i{display:block;height:100%;background:rgb(var(--pole))}
+.meter i{display:inline-block;vertical-align:top;height:100%;background:rgb(var(--pole))}
+.cp{font-size:0}
 table.facts{width:auto;font-size:.82rem;margin:.9rem 0 .8rem}
 table.facts th{font-family:var(--sans);font-size:.72rem;font-weight:500;color:var(--muted);white-space:nowrap;padding-right:.8rem}
 table.facts td{padding-right:2rem;font-variant-numeric:lining-nums}
@@ -1763,11 +1988,19 @@ footer a{color:inherit}
 @top-right{content:"Qwen3.6 Neuron Atlas";vertical-align:bottom;padding-bottom:4mm}
 @bottom-right{content:counter(page) " / " counter(pages);vertical-align:top;padding-top:5mm}}
 @page:first{@top-left{content:""}@top-right{content:""}}
+@media screen and (max-width:40rem){
+table.facts{width:100%}
+table.facts th,table.facts td{display:block;padding:0}
+table.facts td{padding-bottom:.35rem}
+table.facts th{white-space:normal;border:0}
+table:not(.facts){display:block;overflow-x:auto}
+}
 @media print{
 html{font-size:10.4pt}
 main{max-width:none;padding:0}
 .noprint{display:none!important}
 header.doc{padding-top:.7rem}
+h1,h2,h3,h4,h5,h6{break-inside:avoid;page-break-inside:avoid}
 h1,h2,h3,h4,h5,h6,figcaption,p.label,p.note{break-after:avoid;page-break-after:avoid}
 h2{margin-top:2rem}
 section.brk{break-before:page;page-break-before:always}
@@ -1862,7 +2095,14 @@ def _html_tokens(block: _Passage, pole: str) -> str:
             parts.append(text)
             continue
         style = f' style="background:{shade[0]}{";color:#fff" if shade[1] else ""}"' if shade else ""
-        title = "not routed to this neuron's expert" if value is None else f"{value:+.2f}"
+        if value is None:
+            title = "not routed to this neuron's expert"
+        elif example.token_unit == "theta":
+            title = f"{value:+.2f}× θ"
+        elif example.token_unit == "raw":
+            title = f"activation {value:+.2f}"
+        else:
+            title = f"{value:+.2f}"
         parts.append(f'<span class="{" ".join(classes)}"{style} title="{title}">{text}</span>')
     if after:
         parts.append('<span class="ctx"> …</span>')
@@ -1874,8 +2114,8 @@ def _html_passage(block: _Passage, pole: str) -> str:
     example = block.example
     strength, facts, ref = _example_facts(example)
     caption = " · ".join([f"<b>{_h(strength)}</b>"] + [_h(f) for f in facts])
-    if ref:
-        caption = f'<span class="ref">{_h(ref)}</span>' + caption
+    if ref:  # last, as in the other formats; shown at the right, the separator only in copied text
+        caption += f'<span class="cp">&nbsp;·&nbsp;</span><span class="ref">{_h(ref)}</span>'
     _, context = _context(example)
     body = f'<span class="ctx" title="text before the stored window">{_h(context)}</span>' if context else ""
     if example.tokens:
@@ -1898,7 +2138,7 @@ def _html_legend(block: _Legend) -> str:
             "Every token is shaded by the neuron's activation on it: "
             f'<span class="tk ex-own">this pole</span> ({own}; darker = stronger), '
             f'<span class="tk ex-other">the opposite sign</span> ({other}). '
-            "Shading is scaled within each mode, subcircuit or island."
+            "Shading is scaled within each mode, subcircuit or island; hover over a token to see its value."
         )
     parts.append('The boxed <span class="fo">«token»</span> is the firing token.')
     if block.shaded:
@@ -1941,12 +2181,14 @@ def _html_body(blocks: Sequence[_Block], pole: str) -> str:
         elif isinstance(block, _Facts):
             out.append(_html_facts(block))
         elif isinstance(block, _Items):
+            nested = f' class="sub" style="padding-left:{1.25 * (block.depth + 1):g}rem"' if block.depth else ""
             if block.markers:
                 numbers = [re.sub(r"\D", "", marker) or "1" for marker in block.markers]
                 numbered = zip(numbers, block.items, strict=False)
-                out.append("<ol>" + "".join(f'<li value="{n}">{_html_inline(item)}</li>' for n, item in numbered) + "</ol>")
+                items = "".join(f'<li value="{n}">{_html_inline(item)}</li>' for n, item in numbered)
+                out.append(f"<ol{nested}>{items}</ol>")
             else:
-                out.append("<ul>" + "".join(f"<li>{_html_inline(item)}</li>" for item in block.items) + "</ul>")
+                out.append(f"<ul{nested}>" + "".join(f"<li>{_html_inline(item)}</li>" for item in block.items) + "</ul>")
         elif isinstance(block, _Table):
             out.append(_html_table(block))
         elif isinstance(block, _Passage):
@@ -2068,12 +2310,17 @@ def neuron_markdown(detail: NeuronDetail) -> str:
         blocks.append(_para("No pole of this neuron has been read in this release."))
     for hit in detail.poles:
         blocks += _hit_blocks(hit, 1)
-    # The two poles have different inputs, readers and output tokens: show each.
+    # The two poles have different inputs, readers and output tokens: show each - both overviews first.
     circuits = _dict(detail.circuits)
-    for pole, words in (("pos", "positive"), ("neg", "negative")):
-        blocks += _circuit_blocks(
-            circuits.get(pole), pole, title=f"Circuit of the {words} pole", anchor=f"circuit-{pole}"
-        )
+    parts = [
+        _circuit_parts(
+            circuits.get(pole), pole, title=f"Circuit of the {words} pole", anchor=f"circuit-{pole}",
+            continued=f"Circuit of the {words} pole (continued)",
+        )  # fmt: skip
+        for pole, words in (("pos", "positive"), ("neg", "negative"))
+    ]
+    blocks += [block for overview, _ in parts for block in overview]
+    blocks += [block for _, details in parts for block in details]
     blocks += _notes(detail.notes)
     blocks.append(_footer(next((hit.atlas_url for hit in detail.poles if hit.atlas_url), None)))
     return _to_markdown(blocks)

@@ -9,6 +9,8 @@ from __future__ import annotations
 import csv
 import io
 import re
+import time
+from html import unescape
 
 import pytest
 
@@ -320,9 +322,9 @@ def test_every_section_appears_in_order_when_its_data_is_present():
         "### The scientist's full report", "### Subcircuit c0 — Kettle on the stove", "belongs to mode 0 (Kettle words)",
         "**Meaning.** Kettles being put on.", "**Token pattern.**", "**Function.**", "**Gate role.**", "**Up role.**",
         "at or above θ 50% · between 0.5 θ and θ 25% · below 0.5 θ 20% · gate closed 5.0%",
-        "- `L5_E1_N8` (+0.0164; elsewhere +0.0002) - Stoves [in the atlas]", "- `L9_E4_N1` (-0.0007)",
-        "### Inputs", "### Readers", "- `L5_E1_N8` (+0.0164) - Stoves | hobs [in the atlas]", "` whistle` (+0.25)",
-        "### Island 1 — Kettles in recipes", "112 examples in the cluster; 1 shown", '"partition": "p1"',
+        "- `L5_E1_N8` (+0.0164; elsewhere +0.0002) - Stoves \\[in the atlas\\]", "- `L9_E4_N1` (-0.0007)",
+        "### Inputs", "### Readers", "- `L5_E1_N8` (+0.0164) - Stoves | hobs \\[in the atlas\\]", "` whistle` (+0.25)",
+        "### Island 1 (id island0) — Kettles in recipes", "112 examples in the cluster; 1 shown", '"partition": "p1"',
         '"unique_contexts": 12', '"atlas_label": "kettles"', "- A note from the assembler.",
     ):  # fmt: skip
         assert text in md, text
@@ -353,6 +355,69 @@ def test_heading_level_nests_documents():
     assert "\n**Evidence**\n" in md  # deeper than six levels: a bold line instead of a heading
     levels = {token.tag for token in parse_markdown(md) if token.type == "heading_open"}
     assert levels == {"h3", "h4", "h5", "h6"}
+
+
+def test_landscape_numbers_are_labelled_as_the_landscape_s_own():
+    md = render.pole_markdown(make_detail())
+    assert "| Landscape # | Mode | Sampled share |" in md and "Landscape numbers are the landscape's own" in md
+    assert "**Landscape mode 1 - Lids | rims (Q3/Q4).**" in md and "**Mode 1 -" not in md
+    assert "(similar modes side by side), by landscape number: 1, 0." in md
+    assert "| Landscape mode | Top 5% | Strongest 1,000 |" in md and "| Landscape mode | 0 | 1 |" in md
+    assert "### Mode 1 — Q3/Q4 firings (gate input negative)" in md  # the mode list keeps its own numbers
+    # An open mode that the mode list numbers differently is cross-referenced.
+    detail = make_detail()
+    detail.landscape = {**LANDSCAPE, "modes": [{**LANDSCAPE["modes"][0], "pole_mode_index": 3}, *LANDSCAPE["modes"][1:]]}
+    assert "| 0 | Kettle words (mode 3 of the mode list) \\[most damage\\] | 62% |" in render.pole_markdown(detail)
+
+
+def test_circuit_lists_every_group_before_any_member_and_shortens_member_labels():
+    label = "Tokens about kettles " + "and further detail " * 30
+    groups = [
+        {**CIRCUIT["inputs"][0], "id": f"g{i}", "gate": 0.1 / i, "up": -0.01,
+         "members": [{"unit": f"L5_E1_N{i}", "label": label, "weight": 0.01, "in_atlas": True}]}
+        for i in range(1, 9)
+    ]  # fmt: skip
+    circuit = {**CIRCUIT, "inputs": groups}
+    md = render.pole_markdown(PoleDetail(pole=make_hit(), circuit=circuit))
+    first_member = md.index("- `L5_E1_N1`")
+    for text in ("| Group | Name | Role | Lane | Gate | Up | Share | Neurons |", "| g8 | Kitchen context | drives | gate |",
+                 "| r1 | Boiling | lowered by this pole |", "### Output tokens"):  # fmt: skip
+        assert md.index(text) < first_member, text
+    assert "\n### Input groups in detail\n" in md and "**g1 - Kitchen context.** 3 neurons, 1 listed. Earlier neurons" in md
+    member = md[first_member : md.index("\n", first_member)]
+    assert member.endswith("further detail… \\[in the atlas\\]") and len(member) < 180 and label.strip() not in md
+    neuron = NeuronDetail(did="L7_E3_N42", display="L7/E3/N42", layer=7, expert=3, neuron=42, in_atlas_index=True,
+                          circuits={"pos": circuit, "neg": {**CIRCUIT, "pole": "neg"}})  # fmt: skip
+    md = render.neuron_markdown(neuron)
+    # Both poles' groups come before either pole's member lists.
+    assert md.index("## Circuit of the negative pole\n") < md.index("## Circuit of the positive pole (continued)")
+    assert md.index("## Circuit of the positive pole (continued)") < md.index("## Circuit of the negative pole (continued)")
+    assert md.index("| r1 | Boiling |", md.index("## Circuit of the negative pole\n")) < md.index("- `L5_E1_N1`")
+
+
+def test_reader_groups_name_the_label_of_the_other_pole_and_the_circuit_threshold():
+    readers = [
+        {"id": "r1", "name": "Boiling", "effect": "-", "examples": 9, "mean_effect": -0.002, "n_members": 1},
+        {"id": "r8", "name": "Codes", "effect": "+", "examples": 64, "mean_effect": -0.0039, "n_members": 23,
+         "measured_direction": "lowered"},
+    ]  # fmt: skip
+    circuit = {**CIRCUIT, "readers": readers, "examples_analysed": 125, "threshold": 0.805838}
+    md = render.pole_markdown(PoleDetail(pole=make_hit(), theta=0.3192, circuit=circuit))
+    assert "| r1 | Boiling | lowered by this pole | 9 | -0.002 | 1 |" in md
+    assert (
+        "| r8 | Codes | shown as “raised” in the explorer (the label of the other pole) · measured on this pole: lowered "
+        "| 64 | -0.0039 | 23 |"
+    ) in md
+    assert "raised by this pole" not in md
+    assert "*125 examples analysed · threshold of the circuit data 0.8058 (not the pole's θ)*" in md and "θ = 0.3192" in md
+
+
+def test_island_headings_name_the_id_their_examples_use():
+    detail = make_detail()
+    md, text, html = render.pole_markdown(detail), render.pole_text(detail), render.pole_html(detail)
+    assert "### Island 1 (id island0) — Kettles in recipes" in md and "· `island0:0`" in md
+    assert "Island 1 (id island0) — Kettles in recipes" in text
+    assert '<span class="kicker">Island 1 (id island0)</span> Kettles in recipes' in html
 
 
 def test_index_only_pole_says_that_the_long_texts_are_not_mirrored():
@@ -553,7 +618,7 @@ def test_prose_is_escaped_but_typography_is_kept():
 def test_pipes_in_table_cells_are_escaped():
     md = render.pole_markdown(make_detail())
     assert "| Kettle \\| not pot | Swapped the noun. | 3.1× against 0.2×. |" in md
-    assert "Lids \\| rims [Q3/Q4] |" in md and "**Mode 1 - Lids | rims (Q3/Q4).**" in md  # only inside tables
+    assert "Lids \\| rims \\[Q3/Q4\\] |" in md and "**Landscape mode 1 - Lids | rims (Q3/Q4).**" in md  # only in tables
     tokens = parse_markdown(md)
     rows = [i for i, token in enumerate(tokens) if token.type == "tr_open"]
     widths = set()
@@ -563,7 +628,7 @@ def test_pipes_in_table_cells_are_escaped():
         widths.add(len(cells))
         if any("Kettle | not pot" in token.content for token in tokens[start:end]):
             assert len(cells) == 3
-    assert widths <= {2, 3, 4, 5, 6, 7}
+    assert widths <= {2, 3, 4, 5, 6, 7, 8}
 
 
 def test_the_report_is_demoted_and_otherwise_verbatim():
@@ -578,6 +643,91 @@ def test_the_report_is_demoted_and_otherwise_verbatim():
     assert ("h5", "Evidence") in headings and not [h for h in headings if h[0] == "h1"][1:]
     underlined = render._demoted_report("Title\n=====\n\ntext\n\nSub\n---\n\n- item\n---\n", 3)
     assert underlined.startswith("### Title\n") and "\n#### Sub\n" in underlined and "- item\n---" in underlined
+
+
+PAYLOAD = "<img src=x onerror=alert(1)>"
+HOSTILE_REPORTS = {
+    "backtick in the info string": f"# R\n\n```a`b\n{PAYLOAD}\n```\n",
+    "code span over two lines": f"# R\n\nfirst ` line\nsecond ` {PAYLOAD} ` end\n",
+    "closing fence with text after it": f"# R\n\n```\n```x\n```\n{PAYLOAD}\n",
+    "escaped backticks": f"# R\n\ntext \\`{PAYLOAD}\\` end\n",
+    "unequal backtick runs": f"# R\n\nx ```{PAYLOAD}`` y\n",
+    "table cells": f"# R\n\n| a | b |\n|---|---|\n| ` | {PAYLOAD} ` |\n",
+    "code span over two list items": f"# R\n\n- a ` b\n- c {PAYLOAD} ` d\n",
+    "already escaped": f"# R\n\ntext \\{PAYLOAD} end\n",
+    "fence of a list item closed outside it": f"# R\n\n- item\n  ```\n  code\n```\ntext\n```\n{PAYLOAD}\n```\n",
+    "unclosed fence": "# R\n\n```python\nprint(1)\n",
+    "link definitions": (
+        "# R\n\n[q3/q4]: https://evil.invalid/a\n> [most damage]: https://evil.invalid/b\n"
+        "- [closed gate]:\n  https://evil.invalid/c\n\n   [in the atlas]: https://evil.invalid/d\n"
+    ),
+    "script links and images": (
+        "# R\n\n[x](javascript:alert(1)) [y]( <javascript:alert(2)>) [z](\njavascript:alert(3))\n\n"
+        "![t](https://images.invalid/t.gif) <javascript:alert(4)>\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("report", HOSTILE_REPORTS.values(), ids=HOSTILE_REPORTS.keys())
+def test_the_report_cannot_reach_beyond_itself_in_markdown(report):
+    detail = make_detail()
+    detail.overview = {**OVERVIEW, "report_markdown": report}
+    md = render.pole_markdown(detail)
+    tokens = parse_markdown(md)
+    assert not [token for token in tokens if token.type in ("html_block", "html_inline")]
+    # The sections after the report are still sections, not swallowed by a code block it left open.
+    headings = [tokens[i + 1].content for i, token in enumerate(tokens) if token.type == "heading_open"]
+    assert "Subcircuits" in headings and headings[-1] == "Data availability"
+    inline = [child for token in tokens if token.type == "inline" for child in token.children or []]
+    assert not [child for child in inline if child.type == "image"]
+    hrefs = [child.attrs["href"] for child in inline if child.type == "link_open"]
+    assert all(re.match(r"https?://", href) for href in hrefs) and not [h for h in hrefs if "evil.invalid" in h]
+    linked = {inline[i + 1].content for i, child in enumerate(inline) if child.type == "link_open"}
+    assert not linked & {"Q3/Q4", "most damage", "closed gate", "in the atlas", "q3/q4"}
+    # Other renderers keep script links that markdown-it drops: none is left unescaped in the text itself.
+    assert not re.search(r"(?<!\\)\]\((?![ \t]*https?://)|(?<!\\)!\[", md)
+    assert "\\[Q3/Q4\\]" in md and "\\[most damage\\]" in md  # the document's own tags cannot become links
+
+
+def test_the_report_stays_as_written_where_it_is_harmless():
+    report = (
+        "# R\n\n2. *Ladder* A 21 > B 19\n   > C 13 > D 11.\n\n> a real quote\n> second line\n\n"
+        "See [the atlas](https://www.goodfire.com/x) or [write](mailto:a@b.c), 2 < 3.\n\n~~~~py`thon x\ncode <b>\n~~~\n"
+    )
+    out = render._demoted_report(report, 4)
+    assert out.startswith("#### R\n\n2. *Ladder* A 21 > B 19\n   \\> C 13 > D 11.\n\n> a real quote\n> second line\n")
+    assert "See [the atlas](https://www.goodfire.com/x) or [write](mailto:a@b.c), 2 < 3." in out
+    assert out.endswith("\n```python\ncode <b>\n~~~\n```")  # left open: closed, with a fence and info string of its own
+    tokens = parse_markdown(out)
+    assert [token.type for token in tokens].count("blockquote_open") == 1  # the wrapped "> C 13" chain is no quote
+    assert [token.content for token in tokens if token.type == "fence"] == ["code <b>\n~~~\n"]
+
+
+@pytest.mark.parametrize(
+    "report",
+    ["**a " * 20_000, " x ".join("`" * k for k in range(1, 300)), "# a" + " " * 20_000 + "b\n", "*a " * 20_000],
+    ids=["unclosed bold", "backtick runs without partner", "heading with a long gap", "unclosed emphasis"],
+)
+def test_a_pathological_report_renders_without_quadratic_work(report):
+    detail = PoleDetail(pole=make_hit(), overview={"report_markdown": report})
+    for writer in (render.pole_markdown, render.pole_text, render.pole_html):
+        started = time.perf_counter()
+        writer(detail)
+        assert time.perf_counter() - started < 2.0, writer.__name__  # took 4 to 16 s each before
+    marked = "**b** " + "x" * 20_000  # a paragraph this long keeps its marks as text
+    assert render._report_inline(marked) == [render._Span(marked)] and render._report_inline("**b**")[0].style == "b"
+
+
+def test_nested_report_lists_keep_their_numbers_and_depth():
+    report = "# R\n\n1. **First** a\n2. Second\n3. Third:\n   - basket: one\n   - killer: two\n4. Fourth\n\n- loose\n"
+    detail = PoleDetail(pole=make_hit(), overview={"report_markdown": report})
+    html = render.pole_html(detail)
+    assert '<ol><li value="1"><strong>First</strong> a</li><li value="2">Second</li><li value="3">Third:</li></ol>\n' in html
+    assert '\n<ul class="sub" style="padding-left:2.5rem"><li>basket: one</li><li>killer: two</li></ul>\n' in html
+    assert '\n<ol><li value="4">Fourth</li></ol>\n<ul><li>loose</li></ul>' in html
+    text = render.pole_text(detail)
+    assert "  3. Third:\n     - basket: one\n     - killer: two\n  4. Fourth\n\n  - loose\n" in text
+    assert "\n3. Third:\n   - basket: one\n" in render.pole_markdown(detail)  # Markdown keeps the report's own lines
 
 
 def test_the_report_is_rendered_in_html_and_plain_in_text():
@@ -614,6 +764,17 @@ def test_plain_text_has_no_markup_and_wraps_prose_only():
     assert len(rule) <= 100
 
 
+def test_plain_text_tables_line_up_with_wide_characters():
+    assert render._width("花瓶 ok") == 7 and render._width("Café") == 4 and render._width("plain") == 5
+    labels = ["Kettle words", "花瓶 vases and アグレッシブ 'aggressive'", "Café au lait"]
+    modes = [Mode(index=i, label=label, public_label=label, kind="open", share=0.3) for i, label in enumerate(labels)]
+    text = render.pole_text(PoleDetail(pole=make_hit(), modes=modes))
+    rows = [line for line in text.splitlines() if re.match(r"[012]  ", line)]
+    assert len(rows) == 3 and {render._width(row) for row in rows} == {render._width(rows[0])}  # the shares line up
+    # Wrapped to a narrow column, a cell with wide characters stays inside it.
+    assert all(render._width(line) <= 10 for line in render._wrap_cell("花瓶花瓶花瓶 アグレッシブ vases", 10))
+
+
 # --------------------------------------------------------------------------- HTML
 
 
@@ -633,10 +794,40 @@ def test_html_is_a_standalone_printable_page():
     assert '<aside class="legend">' in html and "the opposite sign" in html
     assert "<th>Claim</th><th>Test</th><th>Result</th>" in html and "<td>Kettle | not pot</td>" in html
     assert '<i class="sw" style="background:#1a7f6b;border-color:#1a7f6b"></i>' in html and "javascript:" not in html
-    assert '<span class="tag">most damage</span>' in html and '<span class="tag">Q3/Q4</span>' in html
+    for tag in ("most damage", "Q3/Q4"):  # brackets that are copied but not shown
+        assert f'<span class="tag"><span class="cp">[</span>{tag}<span class="cp">]</span></span>' in html
     assert f'Source: Qwen3.6 Neuron Atlas by Goodfire, <a href="{URL.replace("&", "&amp;")}">' in html
     assert html.count("<section") == html.count("</section>") and html.count("<table") == html.count("</table>")
     assert '<section class="s1 brk" id="subcircuits">' in html  # long appendix-like sections start a page
+
+
+def test_copied_html_reads_like_the_other_formats():
+    html = render.pole_html(make_detail())
+    # The reference of an example comes last, after a separator that is copied but not shown.
+    caption = re.search(r"<figcaption>(.*?)</figcaption>", html).group(1)
+    assert caption.endswith('<span class="cp">&nbsp;·&nbsp;</span><span class="ref">c0:0</span>')
+    copied = unescape(re.sub(r"<[^>]+>", "", caption)).replace("\xa0", " ")
+    assert copied == "3.3× threshold · strongest · Q3/Q4 (closed gate) · held-out · ×4 same context · peak activation +1.25 · c0:0"
+    assert ".cp{font-size:0}" in html and "figure.ex .ref{float:right" in html
+    # A share bar is no block: copying a table row does not break it in two.
+    assert ".meter i{display:inline-block;vertical-align:top;" in html
+
+
+def test_html_fits_a_phone_and_keeps_headings_whole_in_print():
+    html = render.pole_html(make_detail())
+    narrow = re.search(r"@media screen and \(max-width:40rem\)\{(.*?)\n\}", html, re.S).group(1)
+    assert "table.facts th,table.facts td{display:block" in narrow and "table:not(.facts){display:block;overflow-x:auto}" in narrow
+    assert "overflow-wrap:anywhere" in re.search(r"\nmain\{[^}]*\}", html).group(0)  # long hashes in prose wrap
+    printed = re.search(r"@media print\{(.*?)\n\}", html, re.S).group(1)
+    assert "h1,h2,h3,h4,h5,h6{break-inside:avoid;page-break-inside:avoid}" in printed
+
+
+def test_token_values_name_their_unit():
+    theta = passage_html(shaded_example().model_copy(update={"token_unit": "theta"}), "pos")
+    raw = passage_html(shaded_example().model_copy(update={"token_unit": "raw"}), "pos")
+    assert 'title="+1.00× θ">put</span>' in theta and 'title="-1.00× θ"> the</span>' in theta
+    assert 'title="activation +1.00">put</span>' in raw and "not routed to this neuron" in raw
+    assert "hover over a token to see its value" in render.pole_html(make_detail())
 
 
 def test_html_title_and_running_header_cannot_break_out():
