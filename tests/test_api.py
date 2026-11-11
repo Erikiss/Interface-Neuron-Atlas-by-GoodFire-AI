@@ -262,3 +262,8 @@ def test_api_keys_in_urls_are_masked_in_the_access_log():
     )  # fmt: skip
     assert RedactKeys().filter(record) and "s3cret" not in record.getMessage()
     assert "api_key=***&x=1" in record.getMessage()
+
+
+def test_every_response_carries_the_security_headers(client):
+    for r in (client.get("/"), client.get("/api/v1/info"), client.get("/api/v1/info", headers={"Host": "evil.example"})):
+        assert r.headers["referrer-policy"] == "no-referrer" and r.headers["x-content-type-options"] == "nosniff"

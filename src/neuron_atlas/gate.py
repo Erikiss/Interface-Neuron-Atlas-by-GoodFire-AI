@@ -40,6 +40,8 @@ LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 PROTECTED = ("/api/", "/mcp", "/p/")
 #: Largest request body accepted (batch requests included).
 MAX_BODY_BYTES = 2 * 1024 * 1024
+#: Sent with every response: no URL (which may carry ?api_key=) leaks to other sites; no type sniffing.
+SECURITY_HEADERS = ((b"referrer-policy", b"no-referrer"), (b"x-content-type-options", b"nosniff"))
 
 
 class ClientLimiter:
@@ -134,7 +136,7 @@ class Gate:
         send: Send, status: int, error: str, detail: str, headers: dict[str, str] | None = None
     ) -> None:
         body = json.dumps({"error": error, "detail": detail}).encode()
-        raw = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+        raw = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()), *SECURITY_HEADERS]
         raw += [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
         await send({"type": "http.response.start", "status": status, "headers": raw})
         await send({"type": "http.response.body", "body": body})
@@ -220,6 +222,10 @@ class Gate:
                 return  # the 413 is out; whatever the application answers to the cut-off body is dropped
             if message.get("type") == "http.response.start":
                 started = True
+                present = {k.lower() for k, _v in message.get("headers") or []}
+                extra = [h for h in SECURITY_HEADERS if h[0] not in present]
+                if extra:
+                    message = dict(message, headers=[*(message.get("headers") or []), *extra])
             await send(message)
 
         # _TooLarge was answered in limited_receive (or the response had begun and ends incomplete).
