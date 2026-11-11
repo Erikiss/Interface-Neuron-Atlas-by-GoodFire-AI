@@ -245,6 +245,13 @@ def test_a_reader_of_the_other_pole_keeps_its_direction_when_the_mean_rounds_to_
 def test_the_overview_digest_is_checked_against_the_circuit_file(atlas, upstream):
     unchecked = atlas.pole(fakeatlas.RIVER, ["overview"]).overview["circuit_digest"]
     assert unchecked["checked"] is False  # the circuit file is not mirrored yet: nothing is downloaded for this
+    assert unchecked["output_tokens"] == [{"token": " river", "weight": 0.2, "static_weight": 0.2}]  # same shape
+
+    from neuron_atlas.details import align_digest
+
+    neg = {"output_tokens": [{"token": "truk", "weight": -0.1057}, {"token": " the", "weight": 0.0168}]}
+    align_digest(neg, None, "neg")  # a negative pole: raw static weights are negative, unsigned rows positive
+    assert neg["output_tokens"] == [{"token": "truk", "weight": 0.1057, "static_weight": -0.1057}]
     atlas.pole(fakeatlas.RIVER, ["circuit"])  # now it is
     digest = atlas.pole(fakeatlas.RIVER, ["overview"]).overview["circuit_digest"]
     assert digest["checked"] is True and digest["output_tokens"] == [{"token": " river", "weight": 0.2, "static_weight": 0.2}]

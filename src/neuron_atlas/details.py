@@ -227,17 +227,29 @@ def islands_view(raw: dict[str, Any], max_examples: int = 0, with_tokens: bool =
     return view
 
 
-def align_digest(digest: dict[str, Any], circuit: dict[str, Any] | None) -> None:
+def align_digest(digest: dict[str, Any], circuit: dict[str, Any] | None, pole: str = "pos") -> None:
     """Make the Overview's circuit digest agree with the circuit file, where that is at hand.
 
     The digest is stored with the Overview data, which goodfire.com's Overview
-    page never shows: its token list mixes this pole's output tokens with
-    unsigned example tokens, and its reader labels are those of the group's
-    home pole.  With the circuit file, the tokens become the checked list
-    (push on this pole's logit) and readers get their measured direction;
-    without it, ``checked`` is False and the document says so.
+    page never shows: its token list mixes this pole's output tokens (raw
+    static weights, negative on the negative pole) with unsigned example
+    tokens, and its reader labels are those of the group's home pole.  With
+    the circuit file, the tokens become the checked list and readers get their
+    measured direction.  Without it, ``checked`` is False and the document says
+    so; the tokens still get the shape of the checked list (``weight`` = push
+    on this pole's logit, ``static_weight``), and rows whose sign belongs to
+    the other pole - unsigned example tokens on a negative pole - are dropped.
     """
     if circuit is None:
+        want = 1 if pole == "pos" else -1
+        tokens = []
+        for t in digest.get("output_tokens") or []:
+            w = t.get("weight")
+            if isinstance(w, (int, float)) and w * want < 0:
+                continue
+            push = w * want if isinstance(w, (int, float)) else None
+            tokens.append({"token": t.get("token"), "weight": push, "static_weight": w})
+        digest["output_tokens"] = tokens
         digest["checked"] = False
         return
     n = len(digest.get("output_tokens") or []) or 5
@@ -393,7 +405,7 @@ class Details:
                     meta = None
                 if isinstance(meta, dict):
                     circuit = circuit_view(meta, p.pole, self.catalog)
-            align_digest(digest, circuit)
+            align_digest(digest, circuit, p.pole)
 
         return detail
 
