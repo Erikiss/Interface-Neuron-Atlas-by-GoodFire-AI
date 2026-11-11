@@ -159,6 +159,14 @@ export function stateToQuery(s, extra) {
   return { ...q, ...(extra || {}) };
 }
 
+/** SearchQuery JSON (e.g. the server's echo of a query) -> state fields; the inverse of stateToQuery. */
+export function queryToState(q) {
+  const names = { layers: 'layer', experts: 'expert', neurons: 'neuron', categories: 'cat', simulatability_min: 'sim_min', simulatability_max: 'sim_max' };
+  const s = {};
+  for (const [k, v] of Object.entries(q || {})) s[names[k] || k] = v;
+  return s;
+}
+
 /** True when anything narrows the result set (text or filters). */
 export function hasFilters(s) {
   return Object.keys(filterParams(s)).length > 0;

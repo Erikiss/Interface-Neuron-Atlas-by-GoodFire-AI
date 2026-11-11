@@ -3,8 +3,8 @@
 import { api, apiUrl, isAbort } from './api.js';
 import { h, icon, replace, skeleton, bar, fmtInt, fmtNum, fmtPct, fmtSig, displayId, didOf, poleLabel, signChar, clampText, checkClamps } from './dom.js';
 import { t } from './i18n.js';
-import { notice, errorBox, copyButton, popover, toast, segmented } from './ui.js';
-import { buildHash, poleHash, neuronHash } from './state.js';
+import { notice, errorBox, copyButton, popover, toast, segmented, downloadLink } from './ui.js';
+import { buildHash, parseHash, poleHash, neuronHash } from './state.js';
 import { renderExamples, shadingLegend } from './tokens.js';
 import { renderMarkdown } from './markdown.js';
 import { catBadge, sampleBadge, mirrorBadge, kindBadge, unitLink, barCell, heatmap, poleLink } from './parts.js';
@@ -23,6 +23,12 @@ const TAB_SOURCE = { modes: 'subcircuit', overview: 'overview', subcircuits: 'su
 const EXPORT_PARTS = ['modes', 'examples', 'subcircuits', 'overview', 'landscape', 'circuit', 'islands'];
 const PARTS_STORAGE = 'na.exportParts';
 const EXAMPLE_CHOICES = [1, 3, 6, 12];
+
+/** "Examples per group" from the URL (?ex=); 3 when absent or not one of the choices. */
+function examplesFrom(params) {
+  const n = Number(params.get('ex'));
+  return EXAMPLE_CHOICES.includes(n) ? n : 3;
+}
 
 function loadParts() {
   try {
@@ -73,10 +79,18 @@ function focalText(text) {
   return frag;
 }
 
-function effectMark(effect) {
-  if (effect === '+' || effect === 'drives') return h('span', { class: 'effect effect-plus', title: t('circuit.drives') }, '+');
-  if (effect === '-' || effect === '−' || effect === 'opposes') return h('span', { class: 'effect effect-minus', title: t('circuit.opposes') }, '−');
-  return effect ? h('span', { class: 'effect' }, String(effect)) : null;
+/**
+ * The coloured mark of a circuit group.  Input groups: does the group help this pole fire
+ * (its role, drives / opposes)?  The net sign of its gate and up lanes is a different thing
+ * (a driving group of a negative pole lowers up) and stays in the meta line.  Reader
+ * groups: does this pole raise or lower the group?
+ */
+function groupMark(g, kind) {
+  const plus = kind === 'input' ? g.role === 'drives' : g.effect === '+';
+  const minus = kind === 'input' ? g.role === 'opposes' : g.effect === '-' || g.effect === '−';
+  if (!plus && !minus) return null;
+  const title = kind === 'input' ? t(plus ? 'circuit.drives' : 'circuit.opposes') : t(plus ? 'circuit.dir.raised' : 'circuit.dir.lowered');
+  return h('span', { class: `effect ${plus ? 'effect-plus' : 'effect-minus'}`, title }, plus ? '+' : '−');
 }
 
 function memberList(members, { limit = 8 } = {}) {
@@ -98,11 +112,17 @@ function memberList(members, { limit = 8 } = {}) {
       m.weight != null && maxW > 0 ? bar(Math.abs(m.weight), { max: maxW }) : null,
       m.label ? h('span', { class: 'unit-label', title: m.label }, m.label) : null);
   };
-  items.slice(0, limit).forEach((m) => list.appendChild(row(m)));
+  // Every row is built: the ones past `limit` wait behind "+N more" on screen, but print always shows them.
+  items.forEach((m, i) => {
+    const li = row(m);
+    if (i >= limit) li.classList.add('unit-extra');
+    list.appendChild(li);
+  });
   if (items.length > limit) {
+    list.classList.add('is-collapsed');
     const more = h('button', { type: 'button', class: 'linkish no-print' }, t('showMore', { n: items.length - limit }));
     more.addEventListener('click', () => {
-      items.slice(limit).forEach((m) => list.appendChild(row(m)));
+      list.classList.remove('is-collapsed');
       more.remove();
     });
     return h('div', null, list, more);
@@ -126,10 +146,13 @@ export function renderCircuit(circuit) {
   const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + fmtSig(Math.abs(v), 2);
   const group = (g, kind) => {
     const meta = [];
-    if (g.role) meta.push(t(`circuit.role.${g.role}`, null, String(g.role)));
+    if (kind === 'input' && g.role) meta.push(t(`circuit.role.${g.role}`, null, String(g.role)));
+    if (kind === 'reader' && g.effect) meta.push(g.effect === '+' ? t('circuit.dir.raised') : g.effect === '-' || g.effect === '−' ? t('circuit.dir.lowered') : String(g.effect));
     if (g.lane) meta.push(`${t('circuit.lane')}: ${g.lane}`);
     if (typeof g.gate === 'number') meta.push(`gate ${signed(g.gate)}`);
     if (typeof g.up === 'number') meta.push(`up ${signed(g.up)}`);
+    // The net sign of the two lanes (not the role); where gate and up are listed they show it already.
+    if (kind === 'input' && (g.effect === '+' || g.effect === '-') && typeof g.gate !== 'number' && typeof g.up !== 'number') meta.push(t('circuit.net', { sign: g.effect === '-' ? '−' : '+' }));
     if (typeof g.share === 'number') meta.push(`${t('circuit.share')} ${fmtPct(g.share, 0)}`);
     if (g.examples != null) meta.push(t('circuit.examples', { n: fmtInt(g.examples) }));
     if (g.measured_direction) meta.push(t('circuit.measured', { dir: t(`circuit.dir.${g.measured_direction}`, null, String(g.measured_direction)) }));
@@ -137,7 +160,7 @@ export function renderCircuit(circuit) {
     if (n != null) meta.push(t('circuit.members', { n: fmtInt(n) }));
     const about = Array.isArray(g.about) ? g.about.filter((a) => a && typeof a === 'object' && a.name) : [];
     return h('li', { class: `cgroup cgroup-${kind}`, id: g.id ? `cg-${g.id}` : null },
-      h('div', { class: 'cgroup-head' }, effectMark(g.effect), h('span', { class: 'cgroup-name' }, g.name || '–')),
+      h('div', { class: 'cgroup-head' }, groupMark(g, kind), h('span', { class: 'cgroup-name' }, g.name || '–')),
       meta.length ? h('div', { class: 'muted cgroup-meta' }, meta.join(' · ')) : null,
       g.description ? h('p', { class: 'cgroup-desc' }, g.description) : null,
       about.length ? h('ul', { class: 'cgroup-about' }, about.map((a) => h('li', { title: a.description || null }, a.name, a.n != null ? h('span', { class: 'muted' }, ` (${fmtInt(a.n)})`) : null))) : null,
@@ -197,7 +220,7 @@ function islandsView(view, pole) {
 export function mount(container, ctx) {
   let pid = ctx.route.arg;
   let tab = TABS.includes(ctx.route.params.get('tab')) ? ctx.route.params.get('tab') : 'modes';
-  let maxExamples = EXAMPLE_CHOICES.includes(Number(ctx.route.params.get('ex'))) ? Number(ctx.route.params.get('ex')) : 3;
+  let maxExamples = examplesFrom(ctx.route.params);
   let focusMode = ctx.route.params.get('mode');
   let focusSub = ctx.route.params.get('sub');
   let scope = loadParts();
@@ -243,10 +266,33 @@ export function mount(container, ctx) {
   }
 
   function hashFor(next = {}) {
-    const p = { tab: (next.tab ?? tab) === 'modes' ? null : next.tab ?? tab, ex: maxExamples === 3 ? null : maxExamples };
+    const p = { tab: (next.tab ?? tab) === 'modes' ? null : next.tab ?? tab, ex: exParam() };
     if (next.mode != null) p.mode = next.mode;
     if (next.sub != null) p.sub = next.sub;
     return buildHash('pole', pid, p);
+  }
+
+  /** The ?ex= value for links: other poles open with the same number of examples. */
+  function exParam() {
+    return maxExamples === 3 ? null : maxExamples;
+  }
+
+  /** Links to other poles (marked data-pole-link) follow the number of examples; the counterpole link also the tab. */
+  function syncPoleLinks() {
+    for (const a of root.querySelectorAll('a[data-pole-link]')) {
+      const target = parseHash(a.getAttribute('href'));
+      const params = Object.fromEntries(target.params);
+      params.ex = exParam();
+      if (a.dataset.action === 'other-pole') params.tab = tab === 'modes' ? null : tab;
+      a.setAttribute('href', poleHash(target.arg, params));
+    }
+  }
+
+  function setExamples(n) {
+    maxExamples = n;
+    syncActions();
+    for (const name of TABS) panelEls[name].dataset.key = '';
+    syncPoleLinks();
   }
 
   function fetchSection(name) {
@@ -303,7 +349,7 @@ export function mount(container, ctx) {
         stat(t('pole.firings'), detail.n_firings == null ? null : fmtInt(detail.n_firings), t('pole.firingsTip')),
         stat(t('pole.closedShare'), detail.closed_gate_share == null ? null : fmtPct(detail.closed_gate_share, 1), t('pole.closedShareTip'))),
       h('div', { class: 'pole-links no-print' },
-        h('a', { class: 'btn btn-small', href: poleHash(other, { tab: tab === 'modes' ? null : tab }) }, h('span', { class: `sign sign-${p.pole === 'pos' ? 'neg' : 'pos'}` }, signChar(p.pole === 'pos' ? 'neg' : 'pos')), t('pole.otherPole')),
+        h('a', { class: 'btn btn-small', dataset: { action: 'other-pole', poleLink: '1' }, href: poleHash(other, { tab: tab === 'modes' ? null : tab, ex: exParam() }) }, h('span', { class: `sign sign-${p.pole === 'pos' ? 'neg' : 'pos'}` }, signChar(p.pole === 'pos' ? 'neg' : 'pos')), t('pole.otherPole')),
         h('a', { class: 'btn btn-small', href: neuronHash(p.did) }, icon('graph', 15), t('pole.neuronView')),
         /^https:\/\//i.test(p.atlas_url || '') ? h('a', { class: 'btn btn-small', href: p.atlas_url, target: '_blank', rel: 'noopener noreferrer', dataset: { original: '1' } }, icon('external', 15), t('pole.openOriginal')) : h('span', { class: 'muted small', title: t('pole.notOnGoodfireTip') }, t('pole.notOnGoodfire'))));
     checkClamps(head);
@@ -335,12 +381,13 @@ export function mount(container, ctx) {
   // open scope popover keeps its button).
   let syncActions = () => {};
   function renderActions() {
-    const url = (format) => apiUrl(`/api/v1/poles/${encodeURIComponent(pid)}`, exportParams(format));
+    // download links carry no API key (they get copied); the print page opens in a new tab and needs it
+    const url = (format) => apiUrl(`/api/v1/poles/${encodeURIComponent(pid)}`, exportParams(format), { withKey: false });
     const countEl = h('span', { class: 'count' });
     const scopeBtn = h('button', { type: 'button', class: 'btn', 'aria-label': t('export.scope') }, icon('sliders', 15), h('span', null, t('export.scope')), countEl);
-    const mdLink = h('a', { class: 'btn', download: `${pid}.md` }, icon('download', 15), '.md');
-    const jsonLink = h('a', { class: 'btn', download: `${pid}.json` }, icon('download', 15), '.json');
-    const printLink = h('a', { class: 'btn', target: '_blank', rel: 'noopener', title: t('export.printPageTip') }, icon('print', 15), t('export.printPage'));
+    const mdLink = downloadLink(h('a', { class: 'btn', download: `${pid}.md` }, icon('download', 15), '.md'));
+    const jsonLink = downloadLink(h('a', { class: 'btn', download: `${pid}.json` }, icon('download', 15), '.json'));
+    const printLink = h('a', { class: 'btn', target: '_blank', rel: 'noopener noreferrer', title: t('export.printPageTip') }, icon('print', 15), t('export.printPage'));
     const hint = h('span', { class: 'muted small actions-hint' });
     syncActions = () => {
       countEl.textContent = String(includeList('md').length);
@@ -385,10 +432,8 @@ export function mount(container, ctx) {
   function examplesSelect() {
     const sel = h('select', { class: 'input input-inline', 'aria-label': t('pole.examplesPer') }, EXAMPLE_CHOICES.map((n) => h('option', { value: n, selected: n === maxExamples }, String(n))));
     sel.addEventListener('change', () => {
-      maxExamples = Number(sel.value);
+      setExamples(Number(sel.value));
       ctx.go(hashFor(), { replace: true, silent: true });
-      syncActions();
-      for (const name of TABS) panelEls[name].dataset.key = '';
       showTab(tab);
     });
     return h('label', { class: 'field-inline' }, h('span', null, t('pole.examplesPer')), sel);
@@ -496,8 +541,11 @@ export function mount(container, ctx) {
     }
     const hasExamples = detail.modes.some((m) => m.examples && m.examples.length);
     if (detail.modes.length) {
+      // count the modes as the header does; the closed-gate and unassigned buckets are named apart
+      const open = detail.modes.filter((m) => !m.kind || m.kind === 'open').length;
+      const extra = detail.modes.length - open;
       out.push(h('div', { class: 'panel-tools' },
-        h('h3', { class: 'section-title' }, t('modes.title', { n: detail.modes.length })),
+        h('h3', { class: 'section-title' }, t('modes.title', { n: open }), extra ? h('span', { class: 'muted', title: t('modes.extraTip') }, ' + ', t('modes.extra', { n: extra })) : null),
         h('div', { class: 'panel-tools-right no-print' }, examplesSelect()),
         hasExamples ? shadingLegend(pole) : null));
     }
@@ -840,7 +888,7 @@ export function mount(container, ctx) {
     else if (!warn) {
       out.push(notice('empty', t('circuit.emptyTitle'), h('p', null, t('circuit.emptyText')),
         h('p', null, h('a', { class: 'btn btn-small', href: neuronHash(detail.pole.did) }, icon('graph', 15), t('pole.neuronView')), ' ',
-          h('a', { class: 'btn btn-small', href: apiUrl(`/api/v1/neurons/${encodeURIComponent(detail.pole.did)}/raw/meta`), target: '_blank', rel: 'noopener' }, icon('code', 15), t('circuit.raw')))));
+          h('a', { class: 'btn btn-small', href: apiUrl(`/api/v1/neurons/${encodeURIComponent(detail.pole.did)}/raw/meta`), target: '_blank', rel: 'noopener noreferrer' }, icon('code', 15), t('circuit.raw')))));
     }
     const nl = notesList(detail);
     if (nl) out.push(nl);
@@ -903,6 +951,7 @@ export function mount(container, ctx) {
       tabEls[n].tabIndex = on ? 0 : -1;
       panelEls[n].hidden = !on;
     }
+    syncPoleLinks();
     return ensurePanel(name);
   }
 
@@ -928,9 +977,14 @@ export function mount(container, ctx) {
       const res = await api('/api/v1/similar', { params: { pole: pid, mode: byMode ? similarMode : null, top }, signal: similarAbort.signal });
       if (destroyed) return;
       const items = res.items || [];
+      const link = (it) => {
+        const a = poleLink(it.pid, null, { mode: it.mode_index, ex: exParam() });
+        a.dataset.poleLink = '1';
+        return a;
+      };
       const list = h('ol', { class: 'similar-list' }, items.map((it) => h('li', { class: 'similar-item' },
         h('div', { class: 'similar-top' },
-          poleLink(it.pid, null, it.mode_index != null ? { mode: it.mode_index } : null),
+          link(it),
           h('span', { class: 'score', title: t('similar.scoreTip') }, bar(it.score), fmtNum(it.score, 2))),
         it.label ? h('p', { class: 'similar-label' }, it.mode_index != null ? h('span', { class: 'muted' }, t('mode.index', { n: it.mode_index }), ' · ') : null, it.label) : null,
         !it.label && it.description ? clampText(it.description, { lines: 2, moreLabel: t('more'), lessLabel: t('less'), cls: 'similar-desc' }) : null,
@@ -988,8 +1042,11 @@ export function mount(container, ctx) {
 
   return {
     update(route) {
+      // the URL is the truth: a link with or without ?ex= sets the number of examples
+      const ex = examplesFrom(route.params);
       if (route.arg !== pid) {
         pid = route.arg;
+        maxExamples = ex;
         similarMode = null;
         tab = TABS.includes(route.params.get('tab')) ? route.params.get('tab') : 'modes';
         focusMode = route.params.get('mode');
@@ -1001,6 +1058,7 @@ export function mount(container, ctx) {
       const nextTab = TABS.includes(route.params.get('tab')) ? route.params.get('tab') : 'modes';
       focusMode = route.params.get('mode');
       focusSub = route.params.get('sub');
+      if (ex !== maxExamples) setExamples(ex);
       showTab(nextTab);
     },
     destroy() {

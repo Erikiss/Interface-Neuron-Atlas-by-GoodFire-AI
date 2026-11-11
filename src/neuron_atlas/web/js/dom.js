@@ -278,10 +278,24 @@ export function clampText(content, { lines = 2, moreLabel = 'more', lessLabel = 
     if (p.classList.contains('is-open')) return;
     btn.hidden = !(p.scrollHeight > p.clientHeight + 2);
   };
+  // Check again whenever the text is laid out anew: rendered into a hidden panel that is
+  // shown later, or a narrower window.  One frame later, because showing the button
+  // resizes the paragraph, which must not happen inside the observer's own callback.
+  if (typeof ResizeObserver === 'function') {
+    let frame = 0;
+    new ResizeObserver(() => {
+      if (!frame) {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          wrap._check();
+        });
+      }
+    }).observe(p);
+  }
   return wrap;
 }
 
-/** Run the overflow check of every clampText() inside `root` (after it is in the document). */
+/** Run the overflow check of every clampText() inside `root` (after it is in the document; a fallback for browsers without ResizeObserver). */
 export function checkClamps(root) {
   requestAnimationFrame(() => {
     for (const el of root.querySelectorAll('.clamp-wrap')) el._check?.();

@@ -1,7 +1,8 @@
 // Example passages, shaded token by token the way the atlas does it.
 //
-//   own sign (value * sign > 0):  background = pole colour, alpha = min(1, |v| / vmax) * 0.9,
-//                                 white text when that alpha > 0.5
+//   own sign (value * sign > 0):  background = pole colour, alpha = min(1, |v| / vmax) * 0.9;
+//                                 white text where it reads better than the ink (styles.css:
+//                                 alpha > 0.5 in the dark theme, the darkest slate on a light page)
 //   other sign, |v| > 0.05 vmax:  background = the opposite pole's colour, alpha = 0.6 * min(1, |v| / vmax)
 //   value null:                   the token was not routed to this neuron's expert (dotted underline)
 //   focal token:                  outline box
@@ -32,25 +33,33 @@ export function groupVmax(examples) {
 
 const C0_PICTURE = 0x2400;
 
-/** Make control characters visible; newlines and tabs are kept (the caller marks newlines). */
-function visible(text) {
-  let out = '';
-  let changed = false;
+function isControl(c) {
+  return (c < 32 && c !== 10 && c !== 9) || (c >= 127 && c < 160);
+}
+
+/** What the page shows for a control character: its Unicode picture (␀ … ␟, ␡); C1 has none, so its code (boxed by CSS). */
+function picture(c) {
+  if (c < 32) return String.fromCharCode(C0_PICTURE + c);
+  if (c === 127) return '␡';
+  return 'x' + c.toString(16);
+}
+
+/**
+ * Append text to `el`, making control characters visible (newlines and tabs are kept; the
+ * caller marks newlines).  The character itself stays in the DOM, so selecting and copying
+ * a passage gives the original text; the picture is drawn by CSS and is never copied.
+ */
+function appendVisible(el, text) {
+  let from = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    if (c === 10 || c === 9) out += text[i];
-    else if (c < 32) {
-      out += String.fromCharCode(C0_PICTURE + c);
-      changed = true;
-    } else if (c === 127) {
-      out += '␡';
-      changed = true;
-    } else if (c >= 128 && c < 160) {
-      out += '▫';
-      changed = true;
-    } else out += text[i];
+    if (!isControl(c)) continue;
+    if (i > from) el.appendChild(document.createTextNode(text.slice(from, i)));
+    el.appendChild(h('span', { class: c >= 128 ? 'ctl ctl-hex' : 'ctl', dataset: { pic: picture(c) } }, text[i]));
+    from = i + 1;
   }
-  return changed ? out : text;
+  if (from < text.length) el.appendChild(document.createTextNode(from ? text.slice(from) : text));
+  return el;
 }
 
 /** Token text as a JS-style literal for the tooltip. */
@@ -69,18 +78,13 @@ function literal(text) {
 
 /** Fill `el` with text, marking each newline with a (non-copied) return symbol. */
 function setTokenText(el, text) {
-  const shown = visible(text);
-  if (shown === '') {
+  if (text === '') {
     el.classList.add('tok-empty');
     return;
   }
-  if (!shown.includes('\n')) {
-    el.textContent = shown;
-    return;
-  }
-  const parts = shown.split('\n');
+  const parts = text.split('\n');
   parts.forEach((part, i) => {
-    if (part) el.appendChild(document.createTextNode(part));
+    if (part) appendVisible(el, part);
     if (i < parts.length - 1) {
       el.appendChild(h('span', { class: 'nl', 'aria-hidden': 'true' }));
       el.appendChild(document.createTextNode('\n'));
@@ -103,6 +107,8 @@ function tokenSpan(text, value, { sign, vmax, focal, unit }) {
         el.style.backgroundColor = `rgba(${sign > 0 ? POS_RGB : NEG_RGB}, ${alpha.toFixed(3)})`;
         if (alpha > 0.5) el.classList.add('tok-strong');
         else if (alpha > 0.12) el.classList.add('tok-lit');
+        // on a light page only the darkest slate reads better with white text than with the ink
+        if (sign < 0 && alpha > 0.85) el.classList.add('tok-deep');
       } else if (Math.abs(value) > 0.05 * vmax) {
         el.style.backgroundColor = `rgba(${sign > 0 ? NEG_RGB : POS_RGB}, ${(a * 0.6).toFixed(3)})`;
         if (a * 0.6 > 0.12) el.classList.add('tok-lit');
@@ -119,65 +125,68 @@ const WINDOW_BEFORE = 56;
 const WINDOW_AFTER = 28;
 const PRE_TAIL = 150;
 
+// The passage box holds the passage and nothing else, so that selecting and copying it gives
+// exactly its text: the "…" around a cut window are empty marks drawn by CSS (never copied, and
+// a selection can still start or end on them), and the "full context" button sits below the box.
 function renderTokens(ex, opts) {
   const box = h('div', { class: 'ex-text' });
   const tokens = ex.tokens;
   const focal = Number.isInteger(ex.focal_index) ? ex.focal_index : -1;
   const long = tokens.length > WINDOW_BEFORE + WINDOW_AFTER + 24 && focal >= 0;
   let expanded = !long;
+  const more = long ? h('button', { type: 'button', class: 'linkish ex-more no-print' }) : null;
 
   const draw = () => {
     while (box.firstChild) box.removeChild(box.firstChild);
     if (ex.pre) box.appendChild(preSpan(ex.pre));
     const from = expanded ? 0 : Math.max(0, focal - WINDOW_BEFORE);
     const to = expanded ? tokens.length : Math.min(tokens.length, focal + WINDOW_AFTER + 1);
-    if (from > 0) box.appendChild(h('span', { class: 'ex-ellipsis', 'aria-hidden': 'true' }, '… '));
+    if (from > 0) box.appendChild(h('span', { class: 'ex-cut ex-cut-start', 'aria-hidden': 'true' }));
     const frag = document.createDocumentFragment();
     for (let i = from; i < to; i++) frag.appendChild(tokenSpan(tokens[i][0], tokens[i][1], { ...opts, unit: ex.token_unit, focal: i === focal }));
     box.appendChild(frag);
-    if (to < tokens.length) box.appendChild(h('span', { class: 'ex-ellipsis', 'aria-hidden': 'true' }, ' …'));
-    if (long) {
-      box.appendChild(h('button', { type: 'button', class: 'linkish ex-more no-print', onclick: () => { expanded = !expanded; draw(); } },
-        expanded ? t('ex.lessContext') : t('ex.moreContext', { n: tokens.length })));
+    if (to < tokens.length) box.appendChild(h('span', { class: 'ex-cut ex-cut-end', 'aria-hidden': 'true' }));
+    if (more) {
+      more.textContent = expanded ? t('ex.lessContext') : t('ex.moreContext', { n: tokens.length });
+      more.setAttribute('aria-expanded', String(expanded));
     }
   };
+  more?.addEventListener('click', () => {
+    expanded = !expanded;
+    draw();
+  });
   draw();
-  return box;
+  return more ? [box, more] : box;
 }
 
 function preSpan(pre) {
-  const shown = visible(pre);
   const span = h('span', { class: 'ex-pre' });
-  if (shown.length <= PRE_TAIL + 40) {
-    span.textContent = shown;
-    return span;
-  }
-  let cut = shown.length - PRE_TAIL;
-  const ws = shown.slice(cut, cut + 30).search(/\s/);
+  if (pre.length <= PRE_TAIL + 40) return appendVisible(span, pre);
+  let cut = pre.length - PRE_TAIL;
+  const ws = pre.slice(cut, cut + 30).search(/\s/);
   if (ws >= 0) cut += ws + 1;
-  const tail = shown.slice(cut);
   const btn = h('button', { type: 'button', class: 'ex-pre-toggle no-print', title: t('ex.showPre', { n: cut }), 'aria-label': t('ex.showPre', { n: cut }) }, '…');
-  const text = document.createTextNode(tail);
   btn.addEventListener('click', () => {
-    span.textContent = shown;
+    span.textContent = '';
+    appendVisible(span, pre);
   });
-  span.append(btn, text);
-  return span;
+  span.appendChild(btn);
+  return appendVisible(span, pre.slice(cut));
 }
 
 /** Without token data: plain text, the focal token («like this») boxed. */
 function renderPlain(ex) {
   const box = h('div', { class: 'ex-text ex-plain' });
   if (ex.pre) box.appendChild(preSpan(ex.pre));
-  const text = visible(String(ex.text || ''));
-  const focal = ex.focal_token != null ? `«${visible(String(ex.focal_token))}»` : null;
+  const text = String(ex.text || '');
+  const focal = ex.focal_token != null ? `«${ex.focal_token}»` : null;
   const at = focal ? text.indexOf(focal) : -1;
   if (at >= 0) {
-    box.appendChild(document.createTextNode(text.slice(0, at)));
-    box.appendChild(h('span', { class: 'tok tok-focal tok-plainfocal' }, focal.slice(1, -1)));
-    box.appendChild(document.createTextNode(text.slice(at + focal.length)));
+    appendVisible(box, text.slice(0, at));
+    box.appendChild(appendVisible(h('span', { class: 'tok tok-focal tok-plainfocal' }), focal.slice(1, -1)));
+    appendVisible(box, text.slice(at + focal.length));
   } else {
-    box.appendChild(document.createTextNode(text));
+    appendVisible(box, text);
   }
   return box;
 }

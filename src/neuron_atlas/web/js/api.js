@@ -25,6 +25,8 @@ const hooks = {
   askKey: null,
   /** (seconds) => void : called on 429. */
   onRateLimit: null,
+  /** (key) => void : called when a key was entered or changed. */
+  onKey: null,
 };
 
 export function configure(next) {
@@ -43,6 +45,7 @@ export function setApiKey(key) {
   } catch {
     /* private mode: keep it for this page only */
   }
+  if (apiKey) hooks.onKey?.(apiKey);
 }
 
 /** Serialise a plain object into a query string; arrays become comma lists, empty values are dropped. */
@@ -57,7 +60,11 @@ export function toQuery(params) {
   return sp.toString();
 }
 
-/** URL for links (downloads, print pages); carries the API key as ?api_key= when one is set. */
+/**
+ * URL for links.  withKey: carry the API key as ?api_key= (only for pages a new tab must be able
+ * to load, such as the print page).  Links people copy - the API link, downloads - never carry
+ * it; downloads send the key as a header instead (ui.js downloadLink).
+ */
 export function apiUrl(path, params, { withKey = true } = {}) {
   const p = { ...(params || {}) };
   if (withKey && apiKey) p.api_key = apiKey;
@@ -78,7 +85,7 @@ async function promptForKey() {
 }
 
 /**
- * Call the API.  `as`: json (default) | text.  Throws ApiError with the server's
+ * Call the API.  `as`: json (default) | text | blob.  Throws ApiError with the server's
  * `detail` message; AbortError passes through untouched.
  */
 export async function api(path, { params, method = 'GET', body, signal, as = 'json', retried = false } = {}) {
@@ -119,7 +126,7 @@ export async function api(path, { params, method = 'GET', body, signal, as = 'js
     if (res.status === 429 && hooks.onRateLimit) hooks.onRateLimit(retryAfter);
     throw new ApiError(res.status, detail, { code, retryAfter });
   }
-  return as === 'json' ? res.json() : res.text();
+  return as === 'json' ? res.json() : as === 'blob' ? res.blob() : res.text();
 }
 
 export function isAbort(err) {

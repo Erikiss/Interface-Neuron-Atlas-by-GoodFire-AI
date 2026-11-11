@@ -3,9 +3,9 @@
 import { api, apiUrl, isAbort } from './api.js';
 import { h, icon, replace, clear, skeleton, bar, fmtInt, fmtNum, fmtPct, displayId, makeHighlighter, clampText, checkClamps, debounce } from './dom.js';
 import { t } from './i18n.js';
-import { notice, errorBox, popover, segmented, toast } from './ui.js';
-import { CATEGORIES, FEATURES, MATCH_MODES, SCOPES, SORTS, GROUPS, SAMPLES, defaultState, stateFromParams, stateToParams, stateToQuery, filterParams, stateKey, hasFilters, buildHash, poleHash, neuronHash } from './state.js';
-import { catBadge, sampleBadge, mirrorBadge, poleLink } from './parts.js';
+import { notice, errorBox, popover, segmented, toast, downloadLink } from './ui.js';
+import { CATEGORIES, FEATURES, MATCH_MODES, SCOPES, SORTS, GROUPS, SAMPLES, defaultState, stateFromParams, stateToParams, stateToQuery, queryToState, filterParams, stateKey, hasFilters, buildHash, poleHash, neuronHash } from './state.js';
+import { catBadge, sampleBadge, mirrorBadge, poleLink, filterChips } from './parts.js';
 
 const PAGE = 25;
 const AUTO_LOAD_LIMIT = 400;
@@ -109,6 +109,7 @@ export function mount(container, ctx) {
   };
   const layerGrid = h('div', { class: 'layer-grid', role: 'group', 'aria-label': t('filters.layer') });
   const resetBtn = h('button', { type: 'button', class: 'btn btn-small', onclick: () => resetAll() }, icon('reset', 14), t('filters.reset'));
+  const facetUnit = h('p', { class: 'muted small facet-unit', hidden: true }, t('filters.countsPoles'));
 
   function buildFilters() {
     const group = (title, body, hint) => h('section', { class: 'fgroup' }, h('h3', { class: 'fgroup-title' }, title, hint ? h('span', { class: 'muted small fgroup-hint' }, hint) : null), body);
@@ -127,6 +128,7 @@ export function mount(container, ctx) {
     }));
     replace(filterBox,
       h('div', { class: 'filters-head' }, h('h2', null, t('filters.title')), resetBtn),
+      facetUnit,
       group(t('filters.category'), cats),
       group(t('filters.layer'), layerGrid),
       group(t('filters.pole'), poleSeg),
@@ -216,32 +218,8 @@ export function mount(container, ctx) {
   }
 
   function renderChips() {
-    const items = [];
-    const chip = (label, remove) => items.push(h('span', { class: 'chip' }, h('span', null, label),
-      h('button', { type: 'button', class: 'chip-x', 'aria-label': t('filters.remove', { name: label }), onclick: remove }, icon('close', 12))));
-    if (state.match !== 'auto') chip(`${t('search.match')}: ${t(`match.${state.match}`)}`, () => apply({ match: 'auto' }));
-    if (!(state.scope.length === 2 && state.scope.includes('labels') && state.scope.includes('deep'))) chip(`${t('search.scope')}: ${state.scope.map((s) => t(`scope.${s}`)).join(' + ')}`, () => apply({ scope: ['labels', 'deep'] }));
-    for (const c of state.cat) chip(t(`cat.${c}`), () => apply({ cat: state.cat.filter((x) => x !== c) }));
-    for (const l of state.layer) chip(`${t('pole.layer')} ${l}`, () => apply({ layer: state.layer.filter((x) => x !== l) }));
-    if (state.layer_min != null) chip(`${t('pole.layer')} ≥ ${state.layer_min}`, () => apply({ layer_min: null }));
-    if (state.layer_max != null) chip(`${t('pole.layer')} ≤ ${state.layer_max}`, () => apply({ layer_max: null }));
-    if (state.pole) chip(state.pole === 'pos' ? `+ ${t('pole.posShort')}` : `− ${t('pole.negShort')}`, () => apply({ pole: '' }));
-    if (state.sample !== 'all') chip(t(`sample.${state.sample}.tip`), () => apply({ sample: 'all' }));
-    for (const f of state.has) chip(`${t('filters.hasShort')}: ${t(`has.${f}`)}`, () => apply({ has: state.has.filter((x) => x !== f) }));
-    for (const f of state.lacks) chip(`${t('filters.lacksShort')}: ${t(`has.${f}`)}`, () => apply({ lacks: state.lacks.filter((x) => x !== f) }));
-    const range = (label, lo, hi, fmt, patch) => {
-      if (state[lo] == null && state[hi] == null) return;
-      const a = state[lo] == null ? '' : fmt(state[lo]);
-      const b = state[hi] == null ? '' : fmt(state[hi]);
-      chip(`${label} ${a && b ? `${a}–${b}` : a ? `≥ ${a}` : `≤ ${b}`}`, () => apply(patch));
-    };
-    range(t('filters.modes'), 'modes_min', 'modes_max', (v) => fmtInt(v), { modes_min: null, modes_max: null });
-    range(t('filters.sim'), 'sim_min', 'sim_max', (v) => fmtNum(v, 2), { sim_min: null, sim_max: null });
-    range(t('filters.damage'), 'damage_min', 'damage_max', (v) => fmtNum(v, 2), { damage_min: null, damage_max: null });
-    if (state.verdict) chip(t(`verdict.${state.verdict}`), () => apply({ verdict: '' }));
-    if (state.expert.length) chip(`${t('pole.expert')} ${state.expert.join(', ')}`, () => apply({ expert: [] }));
-    if (state.neuron.length) chip(`${t('pole.neuron')} ${state.neuron.join(', ')}`, () => apply({ neuron: [] }));
-    if (state.ids.length) chip(`IDs: ${state.ids.slice(0, 3).map(displayId).join(', ')}${state.ids.length > 3 ? ' …' : ''}`, () => apply({ ids: [] }));
+    const items = filterChips(state).map(({ label, patch }) => h('span', { class: 'chip' }, h('span', null, label),
+      h('button', { type: 'button', class: 'chip-x', 'aria-label': t('filters.remove', { name: label }), onclick: () => apply(patch) }, icon('close', 12))));
     chips.hidden = !items.length;
     replace(chips, items, items.length > 1 ? h('button', { type: 'button', class: 'linkish', onclick: () => resetAll() }, t('filters.reset')) : null);
   }
@@ -249,16 +227,20 @@ export function mount(container, ctx) {
   // ------------------------------------------------------------------ facets
 
   function paintFacets() {
+    // every facet count is a number of poles, also when the list is grouped by mode or neuron
+    const poles = (n) => (n == null ? null : `${fmtInt(n)} ${t('unit.poles', { n })}`);
     const cat = facets.category;
     for (const c of CATEGORIES) {
       const n = cat ? cat[c] || 0 : null;
       catCounts[c].textContent = n == null ? '' : fmtInt(n);
+      catCounts[c].title = poles(n) || '';
       catInputs[c].closest('label').classList.toggle('is-zero', n === 0 && !state.cat.includes(c));
     }
     const lay = facets.layer;
     for (const [layer, el] of layerCounts) {
       const n = lay ? lay[String(layer)] || 0 : null;
       el.textContent = n == null ? '' : fmtInt(n);
+      el.title = poles(n) || '';
       layerButtons.get(layer).classList.toggle('is-zero', n === 0 && !state.layer.includes(layer));
     }
     const setTitles = (seg, counts, values) => {
@@ -323,6 +305,7 @@ export function mount(container, ctx) {
       paintFacets();
       renderResults();
       loadDisjunctiveFacets(facetCtrl.signal);
+      countPoles(facetCtrl.signal);
     } catch (err) {
       if (isAbort(err) || destroyed) return;
       data = null;
@@ -342,7 +325,8 @@ export function mount(container, ctx) {
 
   function digest(res) {
     const items = res.group_by === 'neuron' ? res.neurons : res.group_by === 'mode' ? res.modes : res.hits;
-    return { items: [...(items || [])], total: res.total, next: res.next_offset, took: res.took_ms, notes: res.notes || [], groupBy: res.group_by, understood: res.query || {} };
+    const byPole = res.group_by !== 'neuron' && res.group_by !== 'mode';
+    return { items: [...(items || [])], total: res.total, poleTotal: byPole ? res.total : null, next: res.next_offset, took: res.took_ms, notes: res.notes || [], groupBy: res.group_by, understood: res.query || {} };
   }
 
   async function loadMore() {
@@ -410,19 +394,20 @@ export function mount(container, ctx) {
         catBadge(hit.category, hit.category_words),
         metaBits(hit),
         h('span', { class: 'hit-badges' }, sampleBadge(hit), mirrorBadge(hit))),
-      showHeadline ? h('p', { class: 'hit-headline' }, h('a', { class: 'hit-title', href: poleHash(hit.pid), tabindex: '-1' }, highlight(hit.headline))) : null,
+      showHeadline ? h('p', { class: 'hit-headline' }, highlight(hit.headline)) : null,
       hit.description ? clampText(highlight(hit.description), { lines: 2, moreLabel: t('more'), lessLabel: t('less'), cls: 'hit-desc' }) : null,
       matchList(hit.matches, { skipFields: showHeadline ? ['description', 'headline'] : ['description'] }));
   }
 
   function modeRow(hit) {
-    return h('article', { class: 'hit hit-mode', role: 'listitem', dataset: { href: poleHash(hit.pid, { mode: hit.mode_index }) } },
+    const href = poleHash(hit.pid, { mode: hit.mode_index });
+    return h('article', { class: 'hit hit-mode', role: 'listitem', dataset: { href } },
       h('header', { class: 'hit-head' },
         poleLink(hit.pid, hit.pole, { mode: hit.mode_index }),
-        h('span', { class: 'mode-index' }, t('mode.index', { n: hit.mode_index })),
+        h('a', { class: 'mode-index', href, tabindex: '-1' }, t('mode.index', { n: hit.mode_index })),
         catBadge(hit.category),
         hit.share != null ? h('span', { class: 'meta share-meta' }, bar(hit.share), h('strong', null, fmtPct(hit.share)), ' ', t('mode.shareOf')) : null),
-      h('p', { class: 'hit-modelabel' }, h('a', { class: 'hit-title', href: poleHash(hit.pid, { mode: hit.mode_index }), tabindex: '-1' }, highlight(hit.label))),
+      h('p', { class: 'hit-modelabel' }, highlight(hit.label)),
       matchList(hit.matches, { skipFields: ['mode'] }));
   }
 
@@ -439,7 +424,8 @@ export function mount(container, ctx) {
         matchList(p.matches, { skipFields: ['description'] })))));
   }
 
-  // Rows are plain text (easy to select and copy); the id and the title are the links.
+  // Rows are plain text (easy to select and copy, a drag on a link would not select); the id
+  // (and in mode rows the "Mode N" chip) are the links.
   function rowFor(item) {
     return data.groupBy === 'neuron' ? neuronRow(item) : data.groupBy === 'mode' ? modeRow(item) : poleRow(item);
   }
@@ -452,6 +438,9 @@ export function mount(container, ctx) {
     if (from === 0) list.scrollTop = 0;
   }
 
+  // The export streams poles, whatever the grouping: its button counts poles.
+  const exportLabel = () => (data.poleTotal == null ? t('export.allUnknown') : t('export.all', { n: fmtInt(data.poleTotal) }));
+
   function exportMenu(button) {
     let withDetails = false;
     popover(button, (panel) => {
@@ -463,8 +452,9 @@ export function mount(container, ctx) {
           base.include = 'modes,examples';
           base.max_examples = 2;
         }
+        // no API key in these URLs (they get copied); downloadLink sends it as a header
         replace(links, [['ndjson', 'NDJSON'], ['csv', 'CSV'], ['md', 'Markdown']].map(([fmt, label]) =>
-          h('a', { class: 'menu-link', href: apiUrl('/api/v1/export', { ...base, format: fmt }), download: `neuron-atlas-export.${fmt}`, dataset: { format: fmt } }, icon('download', 15), h('span', null, label), h('span', { class: 'muted small' }, `.${fmt}`))));
+          downloadLink(h('a', { class: 'menu-link', href: apiUrl('/api/v1/export', { ...base, format: fmt }, { withKey: false }), download: `neuron-atlas-export.${fmt}`, dataset: { format: fmt } }, icon('download', 15), h('span', null, label), h('span', { class: 'muted small' }, `.${fmt}`)))));
       };
       const cb = h('input', { type: 'checkbox', checked: withDetails });
       cb.addEventListener('change', () => {
@@ -473,11 +463,32 @@ export function mount(container, ctx) {
       });
       draw();
       panel.append(
-        h('h3', null, t('export.allTitle', { n: fmtInt(data ? data.total : 0) })),
+        h('h3', null, data && data.poleTotal != null ? t('export.allTitle', { n: fmtInt(data.poleTotal) }) : t('export.allUnknown')),
         h('p', { class: 'muted small' }, t('export.allHint')),
         links,
         h('label', { class: 'check', title: t('export.detailsTip') }, cb, h('span', null, t('export.details'))));
     }, { cls: 'popover-menu', align: 'end' });
+  }
+
+  /** Grouped by mode or neuron, the total counts modes / neurons: ask for the number of poles. */
+  async function countPoles(signal) {
+    if (!data || data.poleTotal != null) return;
+    const mine = data;
+    try {
+      const res = await api('/api/v1/search', { params: { ...filterParams(state), limit: 0, snippets: false }, signal });
+      if (destroyed || data !== mine) return;
+      mine.poleTotal = res.total;
+      paintExport();
+    } catch {
+      /* the button keeps its plain label */
+    }
+  }
+
+  let exportBtn = null;
+  function paintExport() {
+    if (!exportBtn || !data) return;
+    replace(exportBtn, icon('download', 14), exportLabel());
+    exportBtn.disabled = data.total === 0 || data.poleTotal === 0;
   }
 
   function renderResults() {
@@ -486,21 +497,31 @@ export function mount(container, ctx) {
     replace(summary,
       h('strong', { class: 'total' }, fmtInt(total)), ' ', unitWord(data.groupBy, total),
       h('span', { class: 'muted took' }, ` · ${fmtNum(data.took, data.took < 10 ? 1 : 0)} ms`));
-    const exportBtn = h('button', { type: 'button', class: 'btn btn-small', dataset: { action: 'export' } }, icon('download', 14), t('export.all', { n: fmtInt(total) }));
+    exportBtn = h('button', { type: 'button', class: 'btn btn-small', dataset: { action: 'export' } });
     exportMenu(exportBtn);
-    exportBtn.disabled = total === 0;
+    paintExport();
     replace(tools,
       exportBtn,
       h('button', { type: 'button', class: 'btn btn-small', dataset: { action: 'region' }, onclick: () => ctx.openRegion({ state, mode: 'search' }) }, icon('download', 14), t('region.open')),
       h('a', { class: 'btn btn-small', href: buildHash('map', '', filterParams(state)) }, icon('map', 14), t('search.onMap')),
-      h('a', { class: 'btn btn-small', href: apiUrl('/api/v1/search', { ...stateToParams(state), limit: PAGE }), target: '_blank', rel: 'noopener', title: t('search.apiTip') }, icon('code', 14), 'API'));
+      h('a', { class: 'btn btn-small', href: apiUrl('/api/v1/search', { ...stateToParams(state), limit: PAGE }, { withKey: false }), target: '_blank', rel: 'noopener noreferrer', title: t('search.apiTip'), dataset: { action: 'api' } }, icon('code', 14), 'API'));
+    // the facet counts next to the filters count poles; say so when the list counts something else
+    facetUnit.hidden = data.groupBy === 'pole';
 
     const noteItems = data.notes.map((n) => h('li', null, n));
-    // Filters the server read out of the query text (layer:30 cat:fn …) are echoed back.
+    // Filters the server read out of the query text (layer:30 cat:fn …) are echoed back, in words.
     const sent = stateToQuery(state);
     const inline = Object.entries(data.understood || {}).filter(([k, v]) => !['q', 'limit', 'offset', 'facets', 'snippets'].includes(k) && JSON.stringify(v) !== JSON.stringify(sent[k]));
+    const words = inline.flatMap(([k, v]) => {
+      if (k === 'sort' || k === 'order' || k === 'group_by') {
+        const [label, prefix] = { sort: ['search.sort', 'sort'], order: ['search.order', 'order'], group_by: ['search.groupBy', 'group'] }[k];
+        return [`${t(label)}: ${t(`${prefix}.${v}`, null, String(v))}`];
+      }
+      const labels = filterChips({ ...defaultState(), ...queryToState({ [k]: v }) }).map((c) => c.label);
+      return labels.length ? labels : [`${k}: ${Array.isArray(v) ? v.join(', ') : v}`];
+    });
     replace(notes,
-      inline.length ? h('p', { class: 'understood muted small' }, t('search.understood'), ' ', inline.map(([k, v]) => h('code', null, `${k}: ${Array.isArray(v) ? v.join(', ') : v}`))) : null,
+      words.length ? h('p', { class: 'understood muted small' }, t('search.understood'), ' ', words.map((w) => h('code', null, w))) : null,
       noteItems.length ? h('ul', { class: 'notes' }, noteItems) : null);
 
     clear(list);
@@ -648,6 +669,7 @@ export function mount(container, ctx) {
     renderResults();
     // counts are cheap: refresh them in the background
     facetCtrl = new AbortController();
+    countPoles(facetCtrl.signal);
     api('/api/v1/search', { params: { ...stateToParams(state), limit: 0, facets: true, snippets: false }, signal: facetCtrl.signal })
       .then((res) => {
         facets = res.facets || {};

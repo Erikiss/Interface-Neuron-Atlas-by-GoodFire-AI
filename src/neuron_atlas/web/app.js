@@ -22,17 +22,40 @@ let info = null;
 
 // --------------------------------------------------------------------------- context shared with the views
 
-let resolveInfo;
-const infoReady = new Promise((resolve) => {
-  resolveInfo = resolve;
-});
+let infoReady = null; // promise of the server info (null when it could not be loaded)
+let infoFailed = false;
+
+/**
+ * Load /api/v1/info.  When that failed (a 401 before the right key was entered), it is loaded
+ * again once a key is entered, and the current view, built without it, is built again.
+ */
+function loadInfo() {
+  infoReady = api('/api/v1/info').then(
+    (data) => {
+      info = data;
+      renderFooter();
+      if (infoFailed) {
+        infoFailed = false;
+        rebuildView();
+      }
+      return data;
+    },
+    () => {
+      infoFailed = true;
+      return null;
+    },
+  );
+  return infoReady;
+}
 
 const ctx = {
   route: parseHash(),
   get info() {
     return info;
   },
-  infoReady,
+  get infoReady() {
+    return infoReady;
+  },
   /**
    * Navigate.  silent: only rewrite the URL (the view has already updated itself);
    * replace: do not add a history entry.
@@ -98,6 +121,13 @@ function route() {
   }
 }
 
+/** Build the current view from scratch (new language, server info that arrived late). */
+function rebuildView() {
+  current.view?.destroy?.();
+  current = { name: null, view: null };
+  route();
+}
+
 // --------------------------------------------------------------------------- chrome (header, footer)
 
 function effectiveTheme() {
@@ -142,10 +172,7 @@ function wireChrome() {
       if (b.dataset.lang === getLang()) return;
       setLang(b.dataset.lang);
       renderChrome();
-      // rebuild the current view in the new language
-      current.view?.destroy?.();
-      current = { name: null, view: null };
-      route();
+      rebuildView();
     });
   }
   document.getElementById('theme-toggle')?.addEventListener('click', () => {
@@ -186,6 +213,16 @@ function wireKeys() {
   });
 }
 
+/** The header wraps to two rows on narrow screens: publish its height for the sticky parts below it. */
+function wireTopbarHeight() {
+  const bar = document.querySelector('.topbar');
+  if (!bar || typeof ResizeObserver !== 'function') return;
+  new ResizeObserver(() => {
+    const height = bar.offsetHeight;
+    if (height) document.documentElement.style.setProperty('--topbar-h', `${height}px`);
+  }).observe(bar);
+}
+
 /** Printing shows everything: collapsed <details> are opened for the print and closed again afterwards. */
 function wirePrint() {
   window.addEventListener('beforeprint', () => {
@@ -207,23 +244,20 @@ function wirePrint() {
 configure({
   askKey: () => promptDialog({ title: t('key.title'), text: t('key.prompt'), label: t('key.label'), type: 'password', okLabel: t('key.save') }),
   onRateLimit: (seconds) => toast(seconds ? t('error.slowDown', { s: seconds }) : t('error.rateLimited'), { kind: 'warn', timeout: 6000 }),
+  onKey: () => {
+    if (infoFailed) loadInfo();
+  },
 });
 
 initTooltips();
 wireChrome();
 wireKeys();
 wirePrint();
+wireTopbarHeight();
 renderChrome();
+loadInfo();
 window.addEventListener('hashchange', route);
 route();
-
-api('/api/v1/info')
-  .then((data) => {
-    info = data;
-    resolveInfo(data);
-    renderFooter();
-  })
-  .catch(() => resolveInfo(null));
 
 // pick up mirror jobs that are already running on the server
 refreshJobs();

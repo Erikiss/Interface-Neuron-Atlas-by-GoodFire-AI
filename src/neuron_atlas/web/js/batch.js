@@ -169,10 +169,12 @@ export function mount(container, ctx) {
               h('td', null, b.mode != null ? h('span', { class: 'match-field' }, t('mode.index', { n: b.mode }), b.share != null ? ` · ${fmtPct(b.share)}` : '', ' ') : null, shorten(b.text, 220)));
           }))));
       }
+      // the query stays plain text (selectable); the link to the search is next to it
       return h('section', { class: 'batch-result' },
         h('header', { class: 'batch-result-head' },
-          h('h2', null, h('a', { href: openHash, title: t('batch.openInSearch') }, q)),
-          h('span', { class: 'muted' }, `${fmtInt(res.total)} ${last.groupBy === 'mode' ? t('unit.modes', { n: res.total }) : t('unit.poles', { n: res.total })}`)),
+          h('h2', null, q),
+          h('span', { class: 'muted' }, `${fmtInt(res.total)} ${last.groupBy === 'mode' ? t('unit.modes', { n: res.total }) : t('unit.poles', { n: res.total })}`),
+          h('a', { class: 'small', href: openHash }, t('batch.openInSearch'), ' →')),
         (res.notes || []).length ? h('ul', { class: 'notes' }, res.notes.map((n) => h('li', null, n))) : null,
         table);
     }));

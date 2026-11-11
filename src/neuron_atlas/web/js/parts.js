@@ -1,8 +1,45 @@
-// Small pieces several views share: badges, id links, heatmaps.
+// Small pieces several views share: badges, id links, filter labels, heatmaps.
 
-import { h, displayId, fmtNum, fmtPct, poleLabel, bar } from './dom.js';
+import { h, displayId, fmtInt, fmtNum, fmtPct, poleLabel, bar } from './dom.js';
 import { t } from './i18n.js';
 import { poleHash, neuronHash } from './state.js';
+
+/**
+ * The filters of a search state in words: [{ label, patch }], where `patch` removes that filter.
+ * One wording for the search chips, the map chips, the region summary and the filters the
+ * server read out of the query text.  Fields missing from `s` count as unset.
+ */
+export function filterChips(s) {
+  const items = [];
+  const add = (label, patch) => items.push({ label, patch });
+  const list = (key) => (Array.isArray(s[key]) ? s[key] : []);
+  if (s.match && s.match !== 'auto') add(`${t('search.match')}: ${t(`match.${s.match}`, null, s.match)}`, { match: 'auto' });
+  const scope = list('scope');
+  if (scope.length && !(scope.length === 2 && scope.includes('labels') && scope.includes('deep'))) add(`${t('search.scope')}: ${scope.map((x) => t(`scope.${x}`, null, x)).join(' + ')}`, { scope: ['labels', 'deep'] });
+  for (const c of list('cat')) add(t(`cat.${c}`, null, c), { cat: list('cat').filter((x) => x !== c) });
+  for (const l of list('layer')) add(`${t('pole.layer')} ${l}`, { layer: list('layer').filter((x) => x !== l) });
+  if (s.layer_min != null) add(`${t('pole.layer')} ≥ ${s.layer_min}`, { layer_min: null });
+  if (s.layer_max != null) add(`${t('pole.layer')} ≤ ${s.layer_max}`, { layer_max: null });
+  if (s.pole) add(s.pole === 'pos' ? `+ ${t('pole.posShort')}` : `− ${t('pole.negShort')}`, { pole: '' });
+  if (s.sample && s.sample !== 'all') add(t(`sample.${s.sample}.tip`, null, s.sample), { sample: 'all' });
+  for (const f of list('has')) add(`${t('filters.hasShort')}: ${t(`has.${f}`, null, f)}`, { has: list('has').filter((x) => x !== f) });
+  for (const f of list('lacks')) add(`${t('filters.lacksShort')}: ${t(`has.${f}`, null, f)}`, { lacks: list('lacks').filter((x) => x !== f) });
+  const range = (label, lo, hi, fmt) => {
+    if (s[lo] == null && s[hi] == null) return;
+    const a = s[lo] == null ? '' : fmt(s[lo]);
+    const b = s[hi] == null ? '' : fmt(s[hi]);
+    add(`${label} ${a && b ? `${a}–${b}` : a ? `≥ ${a}` : `≤ ${b}`}`, { [lo]: null, [hi]: null });
+  };
+  range(t('filters.modes'), 'modes_min', 'modes_max', (v) => fmtInt(v));
+  range(t('filters.sim'), 'sim_min', 'sim_max', (v) => fmtNum(v, 2));
+  range(t('filters.damage'), 'damage_min', 'damage_max', (v) => fmtNum(v, 2));
+  if (s.verdict) add(t(`verdict.${s.verdict}`, null, s.verdict), { verdict: '' });
+  if (list('expert').length) add(`${t('pole.expert')} ${list('expert').join(', ')}`, { expert: [] });
+  if (list('neuron').length) add(`${t('pole.neuron')} ${list('neuron').join(', ')}`, { neuron: [] });
+  const ids = list('ids');
+  if (ids.length) add(`IDs: ${ids.slice(0, 3).map(displayId).join(', ')}${ids.length > 3 ? ' …' : ''}`, { ids: [] });
+  return items;
+}
 
 export function catBadge(category, words) {
   const cat = category || 'none';
