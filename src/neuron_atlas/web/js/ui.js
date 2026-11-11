@@ -1,5 +1,6 @@
-// Shared widgets: toasts, dialogs, popovers, the token tooltip, clipboard, notices.
+// Shared widgets: toasts, dialogs, popovers, the token tooltip, clipboard, downloads, notices.
 
+import { api, getApiKey } from './api.js';
 import { h, icon, replace } from './dom.js';
 import { t } from './i18n.js';
 
@@ -284,6 +285,32 @@ export async function copyText(source) {
   ta.focus();
   ta.select();
   return false;
+}
+
+// --------------------------------------------------------------------------- downloads
+
+/**
+ * Make `a` (href = an API URL, download = file name) work on a server that wants a key, without
+ * the key in its URL (links get copied and shared): when this browser holds a key, a click
+ * fetches the file with the key as a header and saves it from memory.
+ */
+export function downloadLink(a) {
+  a.addEventListener('click', async (ev) => {
+    if (!getApiKey() || ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+    ev.preventDefault();
+    try {
+      const blob = await api(a.getAttribute('href'), { as: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const save = h('a', { href: url, download: a.getAttribute('download') || '', hidden: true });
+      document.body.appendChild(save);
+      save.click();
+      save.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      toast(`${t('download.failed')}: ${err.detail || err.message || err}`, { kind: 'error', timeout: 6000 });
+    }
+  });
+  return a;
 }
 
 /** A button that copies and confirms visibly ("Copied"). */

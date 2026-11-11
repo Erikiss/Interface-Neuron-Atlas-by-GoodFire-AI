@@ -6,6 +6,7 @@ import { h, icon, replace, clear, append, fmtInt, fmtBytes, fmtPct, fmtTime, dis
 import { t } from './i18n.js';
 import { openDialog, notice, errorBox, toast } from './ui.js';
 import { stateToQuery, hasFilters, poleHash, defaultState } from './state.js';
+import { filterChips } from './parts.js';
 
 export const MIRROR_SOURCES = ['subcircuit', 'overview', 'landscape', 'islands', 'circuit'];
 const ACTIVE = new Set(['queued', 'running']);
@@ -125,13 +126,10 @@ export function jobRow(job) {
 
 // --------------------------------------------------------------------------- dialog
 
+/** The current search in words (the same labels as the search page's filter chips). */
 function summariseState(state) {
-  const q = stateToQuery(state);
-  delete q.sort;
-  delete q.order;
-  delete q.group_by;
-  const parts = [];
-  for (const [k, v] of Object.entries(q)) parts.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+  const parts = filterChips(state).map((c) => c.label);
+  if (state.q && state.q.trim()) parts.unshift(t('region.queryText', { q: state.q.trim() }));
   return parts.join(' · ');
 }
 

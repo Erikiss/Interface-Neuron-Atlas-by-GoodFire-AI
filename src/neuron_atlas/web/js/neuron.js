@@ -186,8 +186,9 @@ function poleCard(p) {
       p.n_subcircuits != null ? h('div', { class: 'kv' }, h('dt', null, t('pole.subcircuits')), h('dd', null, fmtInt(p.n_subcircuits))) : null,
       p.simulatability != null ? h('div', { class: 'kv' }, h('dt', null, t('pole.simulatability')), h('dd', null, fmtPct(p.simulatability))) : null,
       p.main_damage_share != null ? h('div', { class: 'kv' }, h('dt', null, t('pole.mainDamage')), h('dd', null, fmtPct(p.main_damage_share))) : null),
+    // the label stays plain text (selectable); the mode number is the link
     modes.length ? h('ol', { class: 'mini-modes' }, modes.map((m) => h('li', null,
-      h('a', { href: poleHash(p.pid, { mode: m.index }) }, m.label),
+      h('span', { class: 'mini-label' }, h('a', { class: 'chiplink mono', href: poleHash(p.pid, { mode: m.index }), title: t('mode.index', { n: m.index }), 'aria-label': t('mode.index', { n: m.index }) }, `M${m.index}`), m.label),
       h('span', { class: 'mini-share' }, bar(m.share, { max: maxShare }), h('span', { class: 'num' }, fmtPct(m.share)))))) : h('p', { class: 'muted' }, t('neuron.noModes')),
     h('p', { class: 'pole-card-foot' }, h('a', { class: 'btn btn-small', href: poleHash(p.pid) }, t('neuron.openPole'), icon('chevron', 14))));
 }
@@ -217,7 +218,14 @@ export function mount(container, ctx) {
       const n = await api(`/api/v1/neurons/${encodeURIComponent(did)}`, { params: { include: 'circuit' }, signal: abort.signal });
       if (destroyed) return;
       did = n.did || did;
-      const summary = n.circuit_summary && typeof n.circuit_summary === 'object' ? Object.entries(n.circuit_summary).filter(([k]) => !['layer', 'expert', 'neuron'].includes(k)) : [];
+      // Only the figures of the circuit data, with names; its other keys are older explorer
+      // fields (an earlier verdict, grouping) that can contradict the pole cards below.
+      const cs = n.circuit_summary && typeof n.circuit_summary === 'object' ? n.circuit_summary : {};
+      const summary = [
+        ['n_ex', t('circuit.examplesAnalysed'), (v) => fmtInt(v)],
+        ['act_max', t('neuron.actMax'), (v) => fmtNum(v, 3)],
+        ['act_min', t('neuron.actMin'), (v) => fmtNum(v, 3)],
+      ].filter(([k]) => typeof cs[k] === 'number').map(([k, label, fmt]) => [label, fmt(cs[k])]);
       replace(head,
         h('div', { class: 'pole-title' },
           h('h1', { class: 'pole-id' }, h('span', { class: 'idtext' }, n.display || displayId(did))),
@@ -227,7 +235,7 @@ export function mount(container, ctx) {
           h('div', { class: 'kv' }, h('dt', null, t('pole.layer')), h('dd', null, fmtInt(n.layer))),
           h('div', { class: 'kv' }, h('dt', null, t('pole.expert')), h('dd', null, n.expert == null ? t('pole.shared') : fmtInt(n.expert))),
           h('div', { class: 'kv' }, h('dt', null, t('pole.neuron')), h('dd', null, fmtInt(n.neuron))),
-          summary.map(([k, v]) => h('div', { class: 'kv' }, h('dt', null, k), h('dd', null, v && typeof v === 'object' ? Object.entries(v).map(([a, b]) => `${a} ${b}`).join(' · ') : typeof v === 'number' ? fmtNum(v, 3) : String(v))))));
+          summary.map(([label, value]) => h('div', { class: 'kv' }, h('dt', null, label), h('dd', null, value)))));
       const poles = n.poles || [];
       replace(polesBox, poles.length ? poles.map(poleCard) : notice('info', t('neuron.noPoles'), h('p', null, t('neuron.noPolesText'))));
       // The two poles have different inputs, readers and output tokens: show the circuit of each.

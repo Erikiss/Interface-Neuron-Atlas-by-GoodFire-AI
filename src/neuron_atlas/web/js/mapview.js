@@ -6,6 +6,7 @@ import { h, icon, replace, fmtInt, displayId, signChar, poleOf, debounce } from 
 import { t } from './i18n.js';
 import { notice, errorBox, segmented, showTipAt, hideTip } from './ui.js';
 import { CATEGORIES, stateFromParams, stateToParams, filterParams, buildHash, poleHash, hasFilters } from './state.js';
+import { filterChips } from './parts.js';
 
 // Sequential blue ramp for layer depth (light: light -> dark; dark theme: dark -> light).
 const RAMP_LIGHT = ['#86b6ef', '#6da7ec', '#5598e7', '#3987e5', '#2a78d6', '#256abf', '#1c5cab', '#184f95', '#104281', '#0d366b'];
@@ -468,13 +469,20 @@ class Scatter {
 
 // --------------------------------------------------------------------------- the view
 
+/** The map's own settings in the URL (defaults when absent or unknown). */
+function mapOptions(params) {
+  const opt = (name, allowed, fallback) => (allowed.includes(params.get(name)) ? params.get(name) : fallback);
+  return {
+    unit: opt('unit', ['pole', 'mode'], 'pole'),
+    method: opt('method', ['pca', 'umap', 'tsne'], 'pca'),
+    clusters: params.has('clusters') && [0, 6, 12, 20, 40].includes(Number(params.get('clusters'))) ? Number(params.get('clusters')) : 12,
+    colorBy: opt('color', ['layer', 'category', 'cluster'], 'cluster'),
+  };
+}
+
 export function mount(container, ctx) {
   let state = stateFromParams(ctx.route.params);
-  const opt = (name, allowed, fallback) => (allowed.includes(ctx.route.params.get(name)) ? ctx.route.params.get(name) : fallback);
-  let unit = opt('unit', ['pole', 'mode'], 'pole');
-  let method = opt('method', ['pca', 'umap', 'tsne'], 'pca');
-  let clusters = ctx.route.params.has('clusters') && [0, 6, 12, 20, 40].includes(Number(ctx.route.params.get('clusters'))) ? Number(ctx.route.params.get('clusters')) : 12;
-  let colorBy = opt('color', ['layer', 'category', 'cluster'], 'cluster');
+  let { unit, method, clusters, colorBy } = mapOptions(ctx.route.params);
   let points = [];
   let clusterList = [];
   let lower = null;
@@ -548,8 +556,7 @@ export function mount(container, ctx) {
   }
 
   function renderChips() {
-    const p = filterParams({ ...state, q: '' });
-    const items = Object.entries(p).map(([k, v]) => h('span', { class: 'chip chip-static' }, `${k}: ${Array.isArray(v) ? v.join(', ') : v}`));
+    const items = filterChips(state).map((c) => h('span', { class: 'chip chip-static' }, c.label));
     replace(chipsBox,
       items,
       h('a', { class: 'linkish', href: buildHash('search', '', stateToParams(state)) }, hasFilters(state) ? t('map.editFilters') : t('map.addFilters')));
@@ -778,11 +785,21 @@ export function mount(container, ctx) {
   return {
     update(route) {
       const next = stateFromParams(route.params);
-      const changed = JSON.stringify(filterParams(next)) !== JSON.stringify(filterParams(state));
+      const opts = mapOptions(route.params);
+      const filtersChanged = JSON.stringify(filterParams(next)) !== JSON.stringify(filterParams(state));
+      const reload = filtersChanged || opts.unit !== unit || opts.method !== method || opts.clusters !== clusters;
+      const recolour = opts.colorBy !== colorBy;
       state = next;
-      if (changed) {
-        qInput.value = state.q;
-        load();
+      ({ unit, method, clusters, colorBy } = opts);
+      unitSeg._set(unit);
+      methodSel.value = method;
+      clusterSel.value = String(clusters);
+      colorSeg._set(colorBy);
+      if (filtersChanged) qInput.value = state.q;
+      if (reload) load();
+      else if (recolour) {
+        focusCluster = null;
+        paint();
       }
     },
     destroy() {
