@@ -47,7 +47,7 @@ function picture(c) {
 /**
  * Append text to `el`, making control characters visible (newlines and tabs are kept; the
  * caller marks newlines).  The character itself stays in the DOM, so selecting and copying
- * a passage gives the original text; the picture is drawn by CSS and is never copied.
+ * a passage gives the original text (see onCopy); the picture is drawn by CSS and is never copied.
  */
 function appendVisible(el, text) {
   let from = 0;
@@ -125,6 +125,15 @@ const WINDOW_BEFORE = 56;
 const WINDOW_AFTER = 28;
 const PRE_TAIL = 150;
 
+/**
+ * The (empty) line after a passage's final newline.  A box shows none by itself, so no drag could reach past
+ * that newline; a line needs a character to place the caret on, here a zero-width space that is never
+ * copied (user-select: none, and passageSelection skips it).
+ */
+function endOfLastLine() {
+  return h('span', { class: 'ex-eol', 'aria-hidden': 'true' }, '\u200b');
+}
+
 // The passage box holds the passage and nothing else, so that selecting and copying it gives
 // exactly its text: the "…" around a cut window are empty marks drawn by CSS (never copied, and
 // a selection can still start or end on them), and the "full context" button sits below the box.
@@ -146,6 +155,7 @@ function renderTokens(ex, opts) {
     for (let i = from; i < to; i++) frag.appendChild(tokenSpan(tokens[i][0], tokens[i][1], { ...opts, unit: ex.token_unit, focal: i === focal }));
     box.appendChild(frag);
     if (to < tokens.length) box.appendChild(h('span', { class: 'ex-cut ex-cut-end', 'aria-hidden': 'true' }));
+    else if (to > from && String(tokens[to - 1][0] ?? '').endsWith('\n')) box.appendChild(endOfLastLine());
     if (more) {
       more.textContent = expanded ? t('ex.lessContext') : t('ex.moreContext', { n: tokens.length });
       more.setAttribute('aria-expanded', String(expanded));
@@ -188,6 +198,7 @@ function renderPlain(ex) {
   } else {
     appendVisible(box, text);
   }
+  if (text.endsWith('\n')) box.appendChild(endOfLastLine());
   return box;
 }
 
@@ -207,6 +218,54 @@ export function renderExample(ex, { pole = 'pos', vmax = 0 } = {}) {
   const body = ex.tokens && ex.tokens.length ? renderTokens(ex, { sign, vmax }) : renderPlain(ex);
   return h('figure', { class: `example example-${pole}` }, head, body);
 }
+
+/**
+ * The characters a selection takes from passage boxes (.ex-text), or null when it takes text from
+ * anywhere else too.  Text inside buttons (the "…" before a long preceding context) and the mark of the
+ * line after a final newline are no part of a passage; a second passage starts on a new line.
+ */
+function passageSelection(selection) {
+  if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  const root = range.commonAncestorContainer;
+  let nodes = [root];
+  if (root.nodeType !== Node.TEXT_NODE) {
+    nodes = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) if (range.intersectsNode(node)) nodes.push(node);
+  }
+  const parts = [];
+  let box = null;
+  for (const node of nodes) {
+    const text = node.data.slice(node === range.startContainer ? range.startOffset : 0, node === range.endContainer ? range.endOffset : node.data.length);
+    const el = node.parentElement;
+    if (!text || !el || el.closest('button, .ex-eol')) continue;
+    const inBox = el.closest('.ex-text');
+    if (!inBox) {
+      if (text.trim()) return null;
+      continue;
+    }
+    if (box && inBox !== box) parts.push('\n');
+    box = inBox;
+    parts.push(text);
+  }
+  return box ? parts.join('') : null;
+}
+
+/**
+ * Copying from passages puts exactly their characters on the clipboard.  The DOM holds each token's
+ * original text, but the browser's own copy turns U+00A0 into a space and drops a final newline; in an
+ * atlas of single tokens those are different tokens.  A selection that also takes other text (a header,
+ * a label) is copied by the browser as usual.  (Only plain text: the browser's rich copy cannot be
+ * kept next to it.)
+ */
+function onCopy(ev) {
+  const text = passageSelection(document.getSelection());
+  if (text == null || !ev.clipboardData) return;
+  ev.clipboardData.setData('text/plain', text);
+  ev.preventDefault();
+}
+document.addEventListener('copy', onCopy);
 
 /** A list of examples sharing one vmax. */
 export function renderExamples(examples, pole) {

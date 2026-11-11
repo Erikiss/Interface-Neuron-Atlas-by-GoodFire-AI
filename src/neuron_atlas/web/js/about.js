@@ -20,6 +20,17 @@ function countBars(counts, labelOf, order) {
     h('td', { class: 'count-bar' }, bar(n, { max }))))));
 }
 
+/**
+ * What the server fetches from Goodfire, in words.  allow_remote_fetch governs fetching while pages are
+ * viewed; downloads someone asks for (region, "fetch this pole") follow can_mirror.
+ */
+function fetchState(s) {
+  if (s.offline) return t('about.fetchOff');
+  const n = fmtInt(s.upstream_requests_per_second);
+  if (s.can_fetch === false || s.allow_remote_fetch === false) return s.can_mirror === false ? t('about.fetchNone') : t('about.fetchDownloads', { n });
+  return s.can_mirror === false ? t('about.fetchNoMirror', { n }) : t('about.fetchOn', { n });
+}
+
 function glossaryList(terms) {
   const dl = h('dl', { class: 'glossary' });
   for (const [term, def] of Object.entries(terms || {})) {
@@ -122,7 +133,7 @@ export function mount(container, ctx) {
         kv(t('about.deepTexts'), fmtInt(idx.deep_texts)),
         kv(t('about.exampleTexts'), fmtInt(idx.example_texts)),
         kv(t('about.semantic'), `${sem.method || '–'}${sem.ready ? '' : ` (${t('about.notReady')})`}`),
-        kv(t('about.fetch'), s.can_fetch === false || s.offline || s.allow_remote_fetch === false ? t('about.fetchOff') : t('about.fetchOn', { n: fmtInt(s.upstream_requests_per_second) }))),
+        kv(t('about.fetch'), fetchState(s))),
       h('p', null, h('button', { type: 'button', class: 'btn btn-small', onclick: () => ctx.openRegion({}) }, icon('download', 15), t('region.open'))));
   }
 

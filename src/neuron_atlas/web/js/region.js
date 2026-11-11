@@ -140,7 +140,9 @@ function summariseState(state) {
 export function openRegionDialog(opts = {}) {
   const info = opts.info || {};
   const settings = info.settings || {};
-  const canFetch = !(settings.can_mirror === false || settings.offline === true || settings.allow_remote_fetch === false);
+  // Downloads go as far as POST /api/v1/mirror accepts them: can_mirror says so (allow_remote_fetch only
+  // governs fetching while pages are viewed, not downloads someone asks for).
+  const canFetch = !(settings.can_mirror === false || settings.offline === true);
   const dlg = openDialog({ title: t('region.title'), cls: 'dialog-wide region-dialog', onClose: () => { stop(); } });
   let planAbort = null;
   let unsub = null;

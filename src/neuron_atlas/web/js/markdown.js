@@ -5,11 +5,20 @@
 
 import { h } from './dom.js';
 
-const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*(?=\S)([\s\S]+?)\*\*|(?<![\w\\])__(?=\S)([\s\S]+?)__(?!\w)|\*(?![\s*])([^*\n]+?)(?<!\s)\*|(?<![\w\\])_(?![\s_])([^_\n]+?)(?<!\s)_(?!\w)|\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|<(https?:\/\/[^>\s]+)>|\\([\\`*_{}[\]()#+\-.!|>~])/g;
+// Every mark spans at most 2,000 characters, and code starts only at the first backtick of a run (as in
+// CommonMark), so that marks without a partner cost linear time, as in render.py's report parser.  An
+// unbounded lazy span, tried from every backtick of a long run, took cubic time and froze the page.
+const INLINE = /(?<!`)(`+)(?!`)([\s\S]{0,1999}?[^`])\1(?!`)|\*\*(?=\S)([\s\S]{1,2000}?)\*\*|(?<![\w\\])__(?=\S)([\s\S]{1,2000}?)__(?!\w)|\*(?![\s*])([^*\n]{1,2000}?)(?<!\s)\*|(?<![\w\\])_(?![\s_])([^_\n]{1,2000}?)(?<!\s)_(?!\w)|\[([^\]\n]{1,2000})\]\(([^)\s]{1,2000})(?:\s+"[^"]{0,2000}")?\)|<(https?:\/\/[^>\s]{1,2000})>|\\([\\`*_{}[\]()#+\-.!|>~])/g;
+
+/** Text longer than this keeps its marks as literal text (real paragraphs stay far below it). */
+const INLINE_LIMIT = 20000;
 
 function inline(text, into) {
+  if (text.length > INLINE_LIMIT) {
+    into.appendChild(document.createTextNode(text));
+    return into;
+  }
   let last = 0;
-  INLINE.lastIndex = 0;
   let m;
   const re = new RegExp(INLINE.source, 'g');
   while ((m = re.exec(text))) {
@@ -31,12 +40,23 @@ function inline(text, into) {
   return into;
 }
 
-const RE_HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
-const RE_FENCE = /^ {0,3}(```+|~~~+)\s*([\w+-]*)\s*$/;
+// Block patterns run on single lines.  None of them may split a run of blanks between two optional parts
+// (as `\s*#*\s*$` did): on a long line that backtracks in quadratic time.
+const RE_HEADING = /^ {0,3}(#{1,6})\s+([\s\S]*)$/;
+const RE_FENCE = /^ {0,3}(```+|~~~+)\s*(?:[\w+-]+\s*)?$/;
 const RE_RULE = /^ {0,3}([-*_])(\s*\1){2,}\s*$/;
-const RE_LIST = /^(\s*)([-*+]|\d{1,4}[.)])\s+(.*)$/;
-const RE_QUOTE = /^ {0,3}>\s?(.*)$/;
-const RE_TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+const RE_LIST = /^(\s*)([-*+]|\d{1,4}[.)])\s+([\s\S]*)$/;
+const RE_QUOTE = /^ {0,3}>\s?([\s\S]*)$/;
+const RE_TABLE_SEP = /^\s*(?:\|\s*)?:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*(?:\|\s*)?$/;
+
+/** A heading's text: without trailing blanks and without a closing sequence of #s (one that follows a blank). */
+function headingText(raw) {
+  const text = raw.trimEnd();
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '#') end--;
+  if (end === text.length || (end > 0 && !/\s/.test(text[end - 1]))) return text;
+  return text.slice(0, end).trimEnd();
+}
 
 function splitRow(line) {
   let s = line.trim();
@@ -106,7 +126,7 @@ function parseBlocks(lines, into) {
     if ((m = RE_HEADING.exec(line))) {
       // Report headings start two levels down so they sit under the page's own headings.
       const level = Math.min(6, m[1].length + 2);
-      inline(m[2], into.appendChild(h(`h${level}`, { class: `md-h md-h${m[1].length}` })));
+      inline(headingText(m[2]), into.appendChild(h(`h${level}`, { class: `md-h md-h${m[1].length}` })));
       i++;
       continue;
     }

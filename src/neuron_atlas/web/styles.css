@@ -450,6 +450,7 @@ select.input { padding-right: 4px; }
 .clamp-wrap > .clamp { flex: 1 1 auto; min-width: 0; }
 .clamp-toggle { font-size: 0.8rem; flex: none; line-height: 1.9; }
 .matches { list-style: none; padding: 0; margin: 7px 0 0; display: flex; flex-direction: column; gap: 3px; }
+.matches.is-collapsed .match-extra { display: none; }
 .match { display: flex; gap: 10px; align-items: baseline; font-size: 0.9rem; }
 .match-field { flex: none; font-size: 0.74rem; font-weight: 650; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.03em; min-width: 7.5em; }
 .match-share { font-weight: 500; text-transform: none; letter-spacing: 0; }
@@ -558,6 +559,9 @@ a.mode-index:hover { color: var(--accent); background: var(--accent-soft); }
 .tok-empty { display: inline-block; width: 0.34em; height: 1.15em; vertical-align: text-bottom; padding: 0; }
 .nl::before { content: "\23CE"; color: var(--ink-3); opacity: 0.7; font-size: 0.9em; }
 .tok-strong .nl::before, .tok-deep .nl::before { color: inherit; }
+/* A passage that ends with a newline gets the line after it (an editor shows it, a box does not by itself),
+   so that a drag down to that line selects, and copies, the newline.  A zero-width space that is never copied. */
+.ex-eol { -webkit-user-select: none; user-select: none; }
 
 /* overview */
 .ov-headline { font-size: 1.2rem; font-weight: 620; line-height: 1.4; max-width: 76ch; margin-bottom: 8px; }
@@ -874,7 +878,24 @@ a.gnode:focus { outline: none; }
   body { background: #fff; display: block; font-size: 10.5pt; }
   .no-print, .topbar, .footer, .toasts, .tooltip, .popover, .filters, .search-opts, .searchbar, .results-tools, .results-foot,
   .clamp-toggle, .similar, .tabs, .crumbs, .pole-actions, .pole-links, .map-zoom, .ex-more, .ex-pre-toggle, .skip-link { display: none !important; }
+  /* no controls on paper: buttons (not the map legend, whose rows are buttons), form fields, the rows that hold them */
+  main button:not(.legend-btn), main input, main select, main textarea, main .segmented, main .field-inline, .sort-opt,
+  .batch-opts, .map-controls, .mirror-box, .match-more, .chips .linkish, .empty-tips li:has(> button) { display: none !important; }
   .print-only { display: block; }
+  /* what the list is for, where the search box is gone */
+  .print-query { margin: 0 0 6px; font-weight: 600; }
+  .print-query:empty { display: none !important; }
+  /* every match of a hit, also the ones behind "+N more" */
+  .matches.is-collapsed .match-extra { display: flex; }
+  /* the landscape table fits the paper (a wider one makes the browser shrink the whole printout):
+     no bars next to its numbers, labels that wrap, headers that may break */
+  .ls-table .ls-label { min-width: 0; }
+  .ls-table .barcell .bar { display: none; }
+  .ls-table .barcell-num { min-width: 0; margin-right: 0; }
+  .ls-table th, .ls-table td { padding-left: 6px; padding-right: 6px; }
+  .table thead th { white-space: normal; letter-spacing: 0; }
+  /* heatmaps of many modes as well: cells as wide as their content (the colour still fills them) */
+  .heatmap .hm-cell { width: auto; min-width: 0; }
   main { max-width: none; padding: 0; margin: 0; }
   a { color: inherit; text-decoration: none; }
   .clamp { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }

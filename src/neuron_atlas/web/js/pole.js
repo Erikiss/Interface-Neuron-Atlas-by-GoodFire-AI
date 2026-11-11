@@ -79,18 +79,81 @@ function focalText(text) {
   return frag;
 }
 
+const DIRECTIONS = ['raised', 'lowered'];
+
+/** The direction a reader group's label gives ('+' raised, '-' lowered), or null. */
+function labelDirection(g) {
+  return g.effect === '+' ? 'raised' : g.effect === '-' || g.effect === '−' ? 'lowered' : null;
+}
+
+/**
+ * What this pole does to a reader group.  `effect` is the label the explorer shows; for a group whose home
+ * is the other pole it is that pole's label, and `measured_direction` then gives the direction measured on
+ * this pole instead.  { label, measured: the two directions (or null); contradicts: the measurement is not
+ * the label; dir: the direction to show, the measured one where there is one (null when the measurement
+ * names no direction) }.
+ */
+function readerDirection(g) {
+  const label = labelDirection(g);
+  const measured = g.measured_direction == null || g.measured_direction === '' ? null : String(g.measured_direction);
+  const contradicts = measured != null && measured !== label;
+  return { label, measured, contradicts, dir: !contradicts ? label : DIRECTIONS.includes(measured) ? measured : null };
+}
+
+const dirWord = (dir) => t(`circuit.dir.${dir}`, null, String(dir));
+
 /**
  * The coloured mark of a circuit group.  Input groups: does the group help this pole fire
  * (its role, drives / opposes)?  The net sign of its gate and up lanes is a different thing
  * (a driving group of a negative pole lowers up) and stays in the meta line.  Reader
- * groups: does this pole raise or lower the group?
+ * groups: does this pole raise or lower the group?  Measured on this pole where the API
+ * measured it (readerDirection), never the other pole's label.
  */
 function groupMark(g, kind) {
-  const plus = kind === 'input' ? g.role === 'drives' : g.effect === '+';
-  const minus = kind === 'input' ? g.role === 'opposes' : g.effect === '-' || g.effect === '−';
+  let plus = false;
+  let minus = false;
+  let title = '';
+  if (kind === 'input') {
+    plus = g.role === 'drives';
+    minus = g.role === 'opposes';
+    title = t(plus ? 'circuit.drives' : 'circuit.opposes');
+  } else {
+    const r = readerDirection(g);
+    plus = r.dir === 'raised';
+    minus = r.dir === 'lowered';
+    title = r.contradicts ? t('circuit.measuredHere', { dir: dirWord(r.dir) }) : dirWord(r.dir);
+  }
   if (!plus && !minus) return null;
-  const title = kind === 'input' ? t(plus ? 'circuit.drives' : 'circuit.opposes') : t(plus ? 'circuit.dir.raised' : 'circuit.dir.lowered');
   return h('span', { class: `effect ${plus ? 'effect-plus' : 'effect-minus'}`, title }, plus ? '+' : '−');
+}
+
+/**
+ * The push of a pole on an output token's logit (> 0 raises it): `weight`, next to the raw static weight
+ * (`static_weight`).  An answer without static_weight gives the static weight alone, which a negative pole
+ * applies with the opposite sign.
+ */
+function tokenPush(x, pole) {
+  if (typeof x.weight !== 'number' || !Number.isFinite(x.weight)) return null;
+  if ('static_weight' in x || pole !== 'neg') return x.weight;
+  return -x.weight;
+}
+
+/**
+ * The Overview's circuit digest names reader groups with the explorer's label only.  The circuit data of
+ * the same pole lists the same groups (same names, same order) and says which of them this pole moves the
+ * other way: give the digest those measurements.
+ */
+function digestWithMeasurements(digest, circuit) {
+  const measured = circuit && Array.isArray(circuit.readers) ? circuit.readers.filter((r) => r && typeof r === 'object') : [];
+  if (!digest || typeof digest !== 'object' || !Array.isArray(digest.readers) || !measured.length) return digest;
+  const byName = new Map();
+  for (const r of measured) byName.set(r.name, byName.has(r.name) ? null : r);
+  const readers = digest.readers.map((g, i) => {
+    if (!g || typeof g !== 'object' || g.measured_direction) return g;
+    const same = measured[i] && measured[i].name === g.name ? measured[i] : byName.get(g.name);
+    return same && same.measured_direction ? { ...g, measured_direction: same.measured_direction } : g;
+  });
+  return { ...digest, readers };
 }
 
 function memberList(members, { limit = 8 } = {}) {
@@ -131,10 +194,10 @@ function memberList(members, { limit = 8 } = {}) {
 }
 
 /**
- * The circuit dictionary of a pole or neuron: {line, inputs[], readers[], output_tokens[], notes[]}.
- * Every key may be missing.
+ * The circuit dictionary of a pole or neuron: {line, pole, inputs[], readers[], output_tokens[], notes[]}.
+ * Every key may be missing; opts.pole names the pole where the dictionary does not (the Overview's digest).
  */
-export function renderCircuit(circuit) {
+export function renderCircuit(circuit, opts = {}) {
   const c = circuit && typeof circuit === 'object' ? circuit : {};
   const inputs = Array.isArray(c.inputs) ? c.inputs.filter((x) => x && typeof x === 'object') : [];
   const readers = Array.isArray(c.readers) ? c.readers.filter((x) => x && typeof x === 'object') : [];
@@ -142,12 +205,20 @@ export function renderCircuit(circuit) {
   const notes = Array.isArray(c.notes) ? c.notes.filter((x) => typeof x === 'string') : [];
   const line = typeof c.line === 'string' ? c.line : typeof c.note === 'string' ? c.note : '';
   if (!inputs.length && !readers.length && !tokens.length && !line && !notes.length) return null;
+  const pole = c.pole === 'pos' || c.pole === 'neg' ? c.pole : opts.pole;
 
-  const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + fmtSig(Math.abs(v), 2);
+  const signed = (v, digits = 2) => (v > 0 ? '+' : v < 0 ? '−' : '') + fmtSig(Math.abs(v), digits);
   const group = (g, kind) => {
     const meta = [];
     if (kind === 'input' && g.role) meta.push(t(`circuit.role.${g.role}`, null, String(g.role)));
-    if (kind === 'reader' && g.effect) meta.push(g.effect === '+' ? t('circuit.dir.raised') : g.effect === '-' || g.effect === '−' ? t('circuit.dir.lowered') : String(g.effect));
+    if (kind === 'reader') {
+      // The explorer's label; where the measurement on this pole says otherwise, the label is the other
+      // pole's and the measurement follows it (as the Markdown export words it).
+      const r = readerDirection(g);
+      const label = r.label ? dirWord(r.label) : g.effect ? String(g.effect) : '';
+      if (label) meta.push(r.contradicts && r.label ? t('circuit.shownAs', { dir: label }) : label);
+      if (r.contradicts) meta.push(t('circuit.measuredHere', { dir: dirWord(r.measured) }));
+    }
     if (g.lane) meta.push(`${t('circuit.lane')}: ${g.lane}`);
     if (typeof g.gate === 'number') meta.push(`gate ${signed(g.gate)}`);
     if (typeof g.up === 'number') meta.push(`up ${signed(g.up)}`);
@@ -155,7 +226,6 @@ export function renderCircuit(circuit) {
     if (kind === 'input' && (g.effect === '+' || g.effect === '-') && typeof g.gate !== 'number' && typeof g.up !== 'number') meta.push(t('circuit.net', { sign: g.effect === '-' ? '−' : '+' }));
     if (typeof g.share === 'number') meta.push(`${t('circuit.share')} ${fmtPct(g.share, 0)}`);
     if (g.examples != null) meta.push(t('circuit.examples', { n: fmtInt(g.examples) }));
-    if (g.measured_direction) meta.push(t('circuit.measured', { dir: t(`circuit.dir.${g.measured_direction}`, null, String(g.measured_direction)) }));
     const n = g.n_members ?? g.n;
     if (n != null) meta.push(t('circuit.members', { n: fmtInt(n) }));
     const about = Array.isArray(g.about) ? g.about.filter((a) => a && typeof a === 'object' && a.name) : [];
@@ -166,7 +236,17 @@ export function renderCircuit(circuit) {
       about.length ? h('ul', { class: 'cgroup-about' }, about.map((a) => h('li', { title: a.description || null }, a.name, a.n != null ? h('span', { class: 'muted' }, ` (${fmtInt(a.n)})`) : null))) : null,
       memberList(g.members, { limit: 4 }));
   };
-  const maxTok = Math.max(...tokens.map((x) => Math.abs(x.weight ?? 0)), 0);
+  const pushes = tokens.map((x) => tokenPush(x, pole));
+  const maxTok = Math.max(...pushes.map((v) => Math.abs(v ?? 0)), 0);
+  const tokenRow = (x, i) => {
+    const v = pushes[i];
+    const tip = [t('circuit.push')];
+    if (typeof x.static_weight === 'number') tip.push(`${t('circuit.staticWeight')} ${signed(x.static_weight, 3)}`);
+    return h('li', null,
+      h('code', { class: 'out-token' }, x.token ?? ''),
+      v != null ? h('span', { class: 'num muted out-push', title: tip.join(' · ') }, signed(v, 3)) : null,
+      v != null ? bar(Math.abs(v), { max: maxTok }) : null);
+  };
   const contexts = Array.isArray(c.strongest_contexts) ? c.strongest_contexts.filter((x) => x && typeof x.text === 'string') : [];
   const facts = [];
   if (c.examples_analysed != null) facts.push([t('circuit.examplesAnalysed'), fmtInt(c.examples_analysed)]);
@@ -178,7 +258,8 @@ export function renderCircuit(circuit) {
       inputs.length ? h('section', null, h('h4', null, t('circuit.inputs'), h('span', { class: 'count' }, fmtInt(inputs.length))), h('ul', { class: 'cgroups' }, inputs.map((g) => group(g, 'input')))) : null,
       readers.length ? h('section', null, h('h4', null, t('circuit.readers'), h('span', { class: 'count' }, fmtInt(readers.length))), h('ul', { class: 'cgroups' }, readers.map((g) => group(g, 'reader')))) : null),
     tokens.length ? h('section', null, h('h4', null, t('circuit.outputTokens')),
-      h('ul', { class: 'out-tokens' }, tokens.map((x) => h('li', null, h('code', { class: 'out-token' }, x.token ?? ''), x.weight != null ? h('span', { class: 'num muted' }, fmtSig(x.weight, 3)) : null, x.weight != null ? bar(Math.abs(x.weight), { max: maxTok }) : null)))) : null,
+      pushes.some((v) => v != null) ? h('p', { class: 'muted small' }, t('circuit.pushHint')) : null,
+      h('ul', { class: 'out-tokens' }, tokens.map(tokenRow))) : null,
     contexts.length ? h('section', null, h('h4', null, t('circuit.contexts')),
       h('ul', { class: `contexts example-${c.pole === 'neg' ? 'neg' : 'pos'}` }, contexts.map((x) => h('li', null,
         h('span', { class: 'cue-text' }, focalText(x.text)),
@@ -473,12 +554,13 @@ export function mount(container, ctx) {
       btn.addEventListener('click', () => fetchThisPole(box));
       const hint = h('span', { class: 'muted small' }, t('source.fetchHint'));
       box.append(btn, hint);
-      // A server that runs offline cannot fetch: say so instead of offering a button that fails.
+      // A server that runs offline or allows no downloads (can_mirror, what POST /api/v1/mirror accepts) says
+      // so instead of offering a button that fails.  allow_remote_fetch does not stop a download asked for.
       ctx.infoReady.then((info) => {
         const st = (info && info.settings) || {};
-        if (st.can_mirror === false || st.offline === true || st.allow_remote_fetch === false) {
+        if (st.can_mirror === false || st.offline === true) {
           btn.disabled = true;
-          hint.textContent = t('source.offline');
+          hint.textContent = st.offline === true ? t('source.offline') : t('source.noMirror');
         }
       });
       return notice('warn', t('source.notMirroredTitle'), h('p', null, t('source.notMirroredText', { name: t(`source.${src}`) })), box);
@@ -584,7 +666,8 @@ export function mount(container, ctx) {
 
   // ------------------------------------------------------------------ tab: overview
 
-  function renderOverview(panel, detail) {
+  /** `circuit`: the pole's circuit data, for the measured directions of the digest's reader groups (or null). */
+  function renderOverview(panel, detail, circuit) {
     const ov = detail.overview;
     const out = [h('h2', { class: 'print-only panel-title' }, t('tab.overview'))];
     const warn = sourceNotice(detail, 'overview');
@@ -639,7 +722,7 @@ export function mount(container, ctx) {
     if (ov.final_description) {
       out.push(h('section', null, h('h3', { class: 'section-title' }, t('ov.final')), h('div', { class: 'prewrap final-desc' }, ov.final_description)));
     }
-    const digest = renderCircuit(ov.circuit_digest);
+    const digest = renderCircuit(digestWithMeasurements(ov.circuit_digest, circuit), { pole });
     if (digest) out.push(h('section', null, h('h3', { class: 'section-title' }, t('ov.digest')), digest));
     if (ov.report_markdown) {
       out.push(h('section', { class: 'report' },
@@ -665,7 +748,7 @@ export function mount(container, ctx) {
     const total = segs.reduce((s, [k]) => s + Math.max(0, profile[k]), 0) || 1;
     return h('div', { class: 'profile' },
       h('div', { class: 'profile-bar', 'aria-hidden': 'true' }, segs.map(([k, cls]) => h('span', { class: `profile-seg ${cls}`, style: { flexGrow: String(Math.max(0, profile[k]) / total), flexBasis: '0' }, dataset: { tip: `${t(`profile.${k}`)}: ${fmtPct(profile[k])}` } }))),
-      h('ul', { class: 'profile-legend' }, segs.map(([k, cls]) => h('li', null, h('span', { class: `legend-swatch ${cls}` }), t(`profile.${k}`), ' ', h('strong', null, fmtPct(profile[k], 0))))));
+      h('ul', { class: 'profile-legend', title: t('profile.tip') }, segs.map(([k, cls]) => h('li', null, h('span', { class: `legend-swatch ${cls}` }), t(`profile.${k}`), ' ', h('strong', null, fmtPct(profile[k], 0))))));
   }
 
   function sidesBlock(circuit) {
@@ -932,7 +1015,14 @@ export function mount(container, ctx) {
     try {
       const detail = await fetchSection(name);
       if (destroyed || panel.dataset.key !== key) return;
-      RENDER[name](panel, detail);
+      // The Overview's circuit digest labels its reader groups the way the explorer does; the circuit data
+      // (the same request the Circuit tab makes) says which of them this pole was measured to move otherwise.
+      const digestReaders = name === 'overview' && ((detail.overview || {}).circuit_digest || {}).readers;
+      const extra = Array.isArray(digestReaders) && digestReaders.length && (detail.pole.available || []).includes('circuit')
+        ? await fetchSection('circuit').then((d) => d.circuit || null, () => null)
+        : null;
+      if (destroyed || panel.dataset.key !== key) return;
+      RENDER[name](panel, detail, extra);
       panel.dataset.ready = '1';
       checkClamps(panel);
       if (name === tab) applyFocus();
