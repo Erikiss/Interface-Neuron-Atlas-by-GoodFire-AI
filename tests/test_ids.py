@@ -44,6 +44,9 @@ def test_pid_helpers_round_trip():
 def test_strict_helpers_reject_loose_spellings():
     assert not ids.is_did("L30/E47/N449")
     assert not ids.is_pid("L30_E47_N449")
+    # Whole string, ASCII digits only (ids from upstream files end up in file names and URLs).
+    assert not ids.is_did("L30_E47_N449\n") and not ids.is_pid("L30_E47_N449__pos\n")
+    assert not ids.is_did("L\u0663_E1_N1") and not ids.is_did(None)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         ids.split_pid("L30_E47_N449")
     with pytest.raises(ValueError):

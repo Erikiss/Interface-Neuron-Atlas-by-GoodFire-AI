@@ -31,8 +31,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import ATLAS_PAGE_URL
-from .ids import did_parts, display_did, is_did, make_pid, normalise_pole
-from .upstream import AtlasSource
+from .ids import did_parts, display_did, is_did, is_pid, make_pid, normalise_pole, split_pid
+from .upstream import AtlasSource, NotMirrored
 
 CATEGORIES = ("mono", "fn", "poly", "dark", "none")
 
@@ -139,6 +139,9 @@ class PoleEntry:
     in_public_sample: bool = False
     #: Position in the explorer's fixed "random" order over all candidate poles.
     sample_rank: int = 0
+    #: Listed in the atlas index.  False for the few poles that only the other indices name: the
+    #: explorer cannot show them, but their files exist; they are never part of the public sample.
+    in_atlas_index: bool = True
 
     @property
     def sign(self) -> str:
@@ -302,17 +305,23 @@ class Catalog:
     # ------------------------------------------------------------------ building
 
     @classmethod
-    def load(cls, source: AtlasSource, *, remote: bool | None = None) -> Catalog:
+    def load(cls, source: AtlasSource, *, remote: bool | None = True) -> Catalog:
         """Fetch (or read from the mirror) the index files and build the catalog.
 
-        Only ``public_atlas_data/index.json`` is required; like the explorer,
-        the catalog degrades gracefully when one of the others is missing.
+        The index files are fetched even where read-through fetching of pole
+        files is switched off (``remote=True``; never in offline mode).  Only
+        ``public_atlas_data/index.json`` is required; like the explorer, the
+        catalog does without an index that this release does not have (or that
+        is not mirrored while offline).  Any other failure - upstream not
+        reachable, a damaged file - is raised: a catalog built without, say, the
+        subcircuit index would have wrong categories and few labels, and it
+        would be kept for the life of the process.  The next request tries again.
         """
 
         def optional(name: str) -> Any:
             try:
                 return source.get_index(name, remote=remote)
-            except Exception:  # noqa: BLE001 - any failure just means "not available"
+            except NotMirrored:
                 return None
 
         atlas = source.get_index("atlas", remote=remote)
@@ -358,6 +367,23 @@ class Catalog:
         headlines = headlines or {}
         circuit_by_did = {str(n.get("did")): n for n in (circuit or {}).get("neurons") or []}
 
+        def make_pole(did: str, pole: str, pid: str, raw_pole: dict[str, Any]) -> PoleEntry:
+            nid = did_parts(did)
+            p = PoleEntry(pid, did, pole, nid.layer, nid.expert, nid.neuron)
+            p.category = raw_pole.get("cat") if raw_pole.get("cat") in CATEGORIES else "none"
+            p.description = str(raw_pole.get("desc") or "")
+            p.has_islands = bool(raw_pole.get("islands"))
+            p.island_name = island_names.get(pid, "")
+            _apply_subcircuit(p, sc_poles.get(pid))
+            p.has_overview = pid in ov_pids
+            p.has_landscape = pid in ls_pids
+            sim = ov_sim.get(pid)
+            p.simulatability = float(sim) if isinstance(sim, (int, float)) else None
+            p.scientist_model = ov_model.get(pid)
+            head = headlines.get(pid)
+            p.headline = head if isinstance(head, str) else ""
+            return p
+
         neurons: dict[str, NeuronEntry] = {}
         for raw in atlas.get("neurons") or []:
             did = str(raw.get("did") or "")
@@ -370,21 +396,23 @@ class Catalog:
                     continue
                 pole = normalise_pole(sign)
                 pid = str(raw_pole.get("pid") or make_pid(did, pole))
-                p = PoleEntry(pid, did, pole, nid.layer, nid.expert, nid.neuron)
-                p.category = raw_pole.get("cat") if raw_pole.get("cat") in CATEGORIES else "none"
-                p.description = str(raw_pole.get("desc") or "")
-                p.has_islands = bool(raw_pole.get("islands"))
-                p.island_name = island_names.get(pid, "")
-                _apply_subcircuit(p, sc_poles.get(pid))
-                p.has_overview = pid in ov_pids
-                p.has_landscape = pid in ls_pids
-                sim = ov_sim.get(pid)
-                p.simulatability = float(sim) if isinstance(sim, (int, float)) else None
-                p.scientist_model = ov_model.get(pid)
-                head = headlines.get(pid)
-                p.headline = head if isinstance(head, str) else ""
-                entry.poles[pole] = p
+                entry.poles[pole] = make_pole(did, pole, pid, raw_pole)
             neurons[did] = entry
+
+        # Poles that only the other indices name (a handful per release): keep them, so that their
+        # files can be read and mirrored, but mark them - the explorer does not list them.
+        listed = {p.pid for n in neurons.values() for p in n.poles.values()}
+        for pid in sorted({str(x) for x in (*sc_poles, *ov_pids, *ls_pids, *island_names)} - listed):
+            if not is_pid(pid):
+                continue
+            did, pole = split_pid(pid)
+            nid = did_parts(did)
+            entry = neurons.get(did)
+            if entry is None:
+                entry = neurons[did] = NeuronEntry(did, nid.layer, nid.expert, nid.neuron)
+            p = make_pole(did, pole, pid, {"islands": pid in island_names})
+            p.in_atlas_index = False
+            entry.poles[pole] = p
 
         # Neurons the circuit explorer knows: attach, and add those the atlas index lacks.
         for did, raw in circuit_by_did.items():
@@ -446,7 +474,7 @@ def _mark_public_sample(neurons: dict[str, NeuronEntry], shell: ShellConstants) 
             continue
         if n.expert is not None and (n.layer, n.expert) in shell.not_sampled_experts:
             continue
-        candidates.extend(n.poles.values())
+        candidates.extend(p for p in n.poles.values() if p.in_atlas_index)
     # JavaScript's localeCompare on these ASCII ids agrees with plain ordering for the tie-break.
     candidates.sort(key=lambda p: (sample_hash(p.pid, shell.seed), p.pid))
     for rank, p in enumerate(candidates):

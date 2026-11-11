@@ -109,7 +109,9 @@ class Atlas:
             with self._lock:
                 if self._semantic is None:
                     embedder, note = make_embedder(
-                        self.settings.embedder, model_dir=self.settings.data_dir / "models"
+                        self.settings.embedder,
+                        model_dir=self.settings.data_dir / "models",
+                        offline=self.settings.offline,
                     )
                     self.embedder_note = note
                     self._semantic = SemanticIndex(
@@ -426,8 +428,32 @@ class Atlas:
             frontier = nxt
         return list(seen)
 
+    def circuit_only_neurons(self, selection: Selection) -> list[str]:
+        """Neurons without poles that the circuit explorer knows, as far as ``selection`` names them.
+
+        ``all`` takes every one of them, ``ids`` the ones it lists.  Searches and
+        similarity work on poles, so they never reach these neurons.
+        """
+        catalog = self.catalog
+        out: dict[str, None] = {}
+        if selection.all:
+            out.update(dict.fromkeys(did for did, n in catalog.neurons.items() if not n.poles and n.circuit is not None))
+        for ref in selection.ids or ():
+            parsed = parse_reference(ref)
+            n = catalog.neurons.get(parsed[0].did) if parsed else None
+            if n is not None and not n.poles and n.circuit is not None:
+                out[n.did] = None
+        return list(out)
+
     def plan_mirror(self, request: MirrorRequest) -> MirrorPlan:
-        return make_plan(self.catalog, self.source, self.select(request.selection), request.sources)
+        selection = request.selection
+        return make_plan(
+            self.catalog,
+            self.source,
+            self.select(selection),
+            request.sources,
+            circuit_neurons=self.circuit_only_neurons(selection),
+        )
 
     def mirror(
         self,

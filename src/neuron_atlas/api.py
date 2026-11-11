@@ -628,13 +628,16 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
         if request.dry_run:
             return mirror_plan(request)
         plan = atlas.plan_mirror(request)
-        if len(plan.poles) > settings.max_mirror_poles:
+        if plan.size > settings.max_mirror_poles:
             raise HTTPException(
                 403,
-                f"{len(plan.poles):,} poles exceed this server's limit of {settings.max_mirror_poles:,} per job "
+                f"{plan.size:,} poles and neurons exceed this server's limit of {settings.max_mirror_poles:,} per job "
                 "(ATLAS_MAX_MIRROR_POLES); narrow the selection or use the command line (neuron-atlas mirror)",
             )
-        job = atlas.mirror_in_background(request, label, plan=plan)
+        try:
+            job = atlas.mirror_in_background(request, label, plan=plan)
+        except ValueError as exc:  # the queue of waiting jobs is full
+            raise HTTPException(429, str(exc), headers={"Retry-After": "60"}) from exc
         return job.as_dict()
 
     @app.get("/api/v1/mirror/jobs", tags=["mirror"], dependencies=[api], summary="Mirror jobs of this server")

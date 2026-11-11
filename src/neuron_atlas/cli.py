@@ -332,7 +332,7 @@ def export(
 
 @app.command()
 def mirror(
-    everything: Annotated[bool, typer.Option("--all", help="Every pole of the release (about 32,000 files, 5 GB).")] = False,
+    everything: Annotated[bool, typer.Option("--all", help="Every pole and every circuit of the release (about 32,000 files, 5 GB).")] = False,
     public_sample: Annotated[bool, typer.Option("--public-sample", help="The 3,000 poles goodfire.com lists.")] = False,
     query: Annotated[str | None, typer.Option("--query", "-q", help="All poles this search finds.")] = None,
     similar_to: Annotated[str | None, typer.Option("--similar-to", help="Poles closest in meaning to this text.")] = None,
@@ -368,8 +368,9 @@ def mirror(
         except (ValueError, NotFound, AtlasError) as exc:
             raise _fail(str(exc)) from None
         est = plan.estimate()
+        extra = f" (+{est['circuit_only_neurons']:,} neurons known only by their circuit)" if est["circuit_only_neurons"] else ""
         out.print(
-            f"[bold]{est['poles']:,}[/bold] poles of [bold]{est['neurons']:,}[/bold] neurons · "
+            f"[bold]{est['poles']:,}[/bold] poles of [bold]{est['neurons']:,}[/bold] neurons{extra} · "
             f"{est['files_total']:,} files, {est['files_present']:,} already mirrored, "
             f"[bold]{est['files_to_fetch']:,}[/bold] to fetch "
             f"(about {est['estimated_download_bytes'] / 1e6:,.0f} MB download, "
@@ -396,7 +397,10 @@ def mirror(
             with progress:
                 task = progress.add_task("fetching", total=est["files_to_fetch"])
                 try:
-                    report = _run_plan(atlas, plan, lambda rep, _res: progress.update(task, completed=rep.fetched + rep.skipped + rep.absent + rep.failed))
+                    report = _run_plan(
+                        atlas, plan,
+                        lambda rep, _res: progress.update(task, completed=rep.fetched + rep.skipped + rep.absent + rep.failed + rep.not_attempted),
+                    )  # fmt: skip
                 except KeyboardInterrupt:
                     err.print("\ninterrupted - run the same command again to continue")
                     raise typer.Exit(130) from None
@@ -407,6 +411,13 @@ def mirror(
             )
             for line in report.errors[:5]:
                 err.print(f"[red]{line}[/red]")
+            if report.stopped:
+                err.print(
+                    f"[red]stopped early: {report.stopped}[/red]\n"
+                    f"{report.not_attempted:,} files were not tried; run the same command again later to continue"
+                )
+            if report.nothing_worked:
+                raise typer.Exit(1)
         if request.index:
             added = _index(atlas, plan.poles, index_examples)
             out.print(f"indexed {added:,} texts for search")

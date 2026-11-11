@@ -547,9 +547,9 @@ def build_server(atlas: Atlas) -> MCPServer:
                 out["download"] = "not permitted on this server"
             elif not atlas.source.can_fetch(remote=True):
                 out["download"] = "not possible: this server runs offline"
-            elif len(plan.poles) > settings.max_mirror_poles:
+            elif plan.size > settings.max_mirror_poles:
                 out["download"] = (
-                    f"refused: {len(plan.poles)} poles exceed this server's limit of {settings.max_mirror_poles} "
+                    f"refused: {plan.size} poles and neurons exceed this server's limit of {settings.max_mirror_poles} "
                     "per job; narrow the region or use the command line (neuron-atlas mirror)"
                 )
             else:

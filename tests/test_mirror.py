@@ -95,3 +95,35 @@ def test_background_jobs(atlas):
     assert info["state"] == "done" and info["progress"] == 1.0 and info["report"]["fetched"] == 7
     assert done == [job] and jobs.get(job.id) is job and jobs.list() == [job]
     assert not jobs.cancel(job.id) and not jobs.cancel("unknown")
+
+
+def test_mirror_all_and_ids_reach_neurons_without_poles(atlas):
+    everything = atlas.plan_mirror(MirrorRequest(selection=Selection(all=True)))
+    assert "L2_E5_N6" in everything.circuit_neurons
+    assert "moe_circuit_explorer_data/L2_E5_N6/meta.json" in everything.files
+    assert everything.estimate()["circuit_only_neurons"] == len(everything.circuit_neurons)
+    by_id = atlas.plan_mirror(MirrorRequest(selection=Selection(ids=["L2/E5/N6"])))
+    assert by_id.poles == [] and by_id.circuit_neurons == ["L2_E5_N6"] and by_id.size == 1
+    no_circuit = atlas.plan_mirror(MirrorRequest(selection=Selection(ids=["L2_E5_N6"]), sources=["overview"]))
+    assert no_circuit.circuit_neurons == []
+
+
+def test_a_job_that_cannot_fetch_anything_fails_and_indexes_nothing(settings):
+    import httpx
+
+    from neuron_atlas.mirror import MirrorPlan
+    from neuron_atlas.upstream import AtlasSource
+
+    def handler(request):
+        return httpx.Response(403, text="blocked")
+
+    with AtlasSource(settings, client=httpx.Client(transport=httpx.MockTransport(handler))) as src:
+        ran = []
+        jobs = MirrorJobs(src, after=ran.append)
+        plan = MirrorPlan(poles=[fakeatlas.RIVER], sources=("subcircuit",), missing=["subcircuit_modes_data/L4_E1_N10__pos.json"])
+        job = jobs.submit(plan, label="blocked")
+        deadline = time.time() + 10
+        while job.state in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.01)
+        assert job.state == "failed" and "403" in job.error and ran == []
+        jobs.shutdown()

@@ -1,3 +1,5 @@
+import pytest
+
 from neuron_atlas.catalog import Catalog, ShellConstants, sample_hash
 
 from . import fakeatlas
@@ -94,3 +96,76 @@ def test_stats_and_optional_indices(atlas, upstream):
     bare = Catalog.build(atlas=json.loads(upstream.files["public_atlas_data/index.json"]))
     assert bare.pole(fakeatlas.RIVER).description == "River names in running text"
     assert bare.pole(fakeatlas.RIVER).modes == []
+
+
+def _fixture_indices(upstream):
+    import json
+
+    def load(path):
+        return json.loads(upstream.files[path])
+
+    return load
+
+
+def test_a_pole_without_category_and_read_is_none(upstream):
+    load = _fixture_indices(upstream)
+    atlas = load("public_atlas_data/index.json")
+    for raw in atlas["neurons"]:
+        for pole in raw["poles"].values():
+            if pole and pole["pid"] == "L30_E3_N7__neg":
+                pole["cat"] = None
+    # Without the subcircuit index the pole has no read: it is "not yet read".
+    cat = Catalog.build(atlas=atlas)
+    pole = cat.pole("L30_E3_N7__neg")
+    assert pole.category == "none" and pole.category_words == "not yet read"
+    assert cat.stats()["categories"]["none"] >= 1
+
+
+def test_poles_only_the_other_indices_name_are_kept_but_marked(upstream):
+    load = _fixture_indices(upstream)
+    sub = load("subcircuit_modes_index.json")
+    sub["poles"]["L50_E1_N1__pos"] = {
+        "verdict": "monosemantic", "n_modes": 1, "modes": [{"label": "Only in the subcircuit index", "share": 1.0}]
+    }  # fmt: skip
+    cat = Catalog.build(
+        atlas=load("public_atlas_data/index.json"),
+        subcircuit=sub,
+        overview={"pids": ["L50_E1_N1__neg"], "sim": {}, "model": {}},
+        shell=ShellConstants(sample_size=10_000),
+    )
+    pos, neg = cat.pole("L50_E1_N1__pos"), cat.pole("L50_E1_N1__neg")
+    assert pos.category == "mono" and pos.description == "Only in the subcircuit index" and pos.has_subcircuit
+    assert neg.has_overview and neg.category == "none"
+    assert not pos.in_atlas_index and not pos.in_public_sample and not neg.in_public_sample
+    assert not cat.neuron("L50_E1_N1").in_atlas_index
+    # The public sample is unchanged: every pole of the atlas index is in it (size 10,000), the extras are not.
+    assert all(p.in_public_sample == p.in_atlas_index for p in cat.iter_poles() if p.layer != 14)
+
+
+def test_a_failing_optional_index_fails_the_load_instead_of_degrading_it(settings, upstream, monkeypatch):
+    import time
+
+    import httpx
+
+    from neuron_atlas.upstream import AtlasSource, UpstreamError
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    broken = {"on": True}
+
+    def handler(request):
+        if broken["on"] and str(request.url).endswith("subcircuit_modes_index.json"):
+            return httpx.Response(503, text="overloaded")
+        return upstream.handler(request)
+
+    with AtlasSource(settings, client=httpx.Client(transport=httpx.MockTransport(handler))) as src:
+        with pytest.raises(UpstreamError):
+            Catalog.load(src)
+        broken["on"] = False
+        assert Catalog.load(src).stats()["categories"].get("fn") == 1  # the next attempt has every index
+
+
+def test_the_catalog_loads_with_read_through_switched_off(settings, upstream):
+    from neuron_atlas.upstream import AtlasSource
+
+    with AtlasSource(settings.with_overrides(allow_remote_fetch=False), client=upstream.client()) as src:
+        assert len(Catalog.load(src)) == 9

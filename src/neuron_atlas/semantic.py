@@ -192,10 +192,19 @@ class FastEmbedEmbedder:
     DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
     MULTILINGUAL_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
-    def __init__(self, model: str | None = None, *, cache_dir: Path | str | None = None, batch_size: int = 256):
+    def __init__(
+        self,
+        model: str | None = None,
+        *,
+        cache_dir: Path | str | None = None,
+        batch_size: int = 256,
+        offline: bool = False,
+    ):
         self.model_name = model or self.DEFAULT_MODEL
         self.cache_dir = str(cache_dir) if cache_dir else None
         self.batch_size = batch_size
+        #: Only use a model that is already in the cache (offline mode never touches the network).
+        self.offline = offline
         self.name = "fastembed-" + "".join(c if c.isalnum() else "-" for c in self.model_name).strip("-").lower()
         self._model: object | None = None
         self._lock = threading.Lock()
@@ -206,7 +215,8 @@ class FastEmbedEmbedder:
                 if self._model is None:
                     from fastembed import TextEmbedding  # type: ignore[import-not-found]
 
-                    self._model = TextEmbedding(model_name=self.model_name, cache_dir=self.cache_dir)
+                    extra = {"local_files_only": True} if self.offline else {}
+                    self._model = TextEmbedding(model_name=self.model_name, cache_dir=self.cache_dir, **extra)
         return self._model
 
     def fit(self, texts: Sequence[str]) -> np.ndarray:
@@ -220,11 +230,15 @@ class FastEmbedEmbedder:
         return _unit(np.asarray(list(model.query_embed(list(texts))), dtype=np.float32))
 
 
-def make_embedder(spec: str | None, *, model_dir: Path | None = None) -> tuple[Embedder, str | None]:
+def make_embedder(
+    spec: str | None, *, model_dir: Path | None = None, offline: bool = False
+) -> tuple[Embedder, str | None]:
     """Embedder for a setting such as ``lsa``, ``fastembed``, ``fastembed:multilingual`` or ``fastembed:<model>``.
 
     Returns the embedder and a note when the requested one is not available
-    (the built-in LSA is used instead).
+    (the built-in LSA is used instead): the package is missing, or the model
+    cannot be loaded - in ``offline`` mode only a model already in ``model_dir``
+    is used, nothing is downloaded.
     """
     spec = (spec or "lsa").strip()
     kind, _, model = spec.partition(":")
@@ -240,7 +254,16 @@ def make_embedder(spec: str | None, *, model_dir: Path | None = None) -> tuple[E
             )
         if model.lower() == "multilingual":
             model = FastEmbedEmbedder.MULTILINGUAL_MODEL
-        return FastEmbedEmbedder(model or None, cache_dir=model_dir), None
+        embedder = FastEmbedEmbedder(model or None, cache_dir=model_dir, offline=offline)
+        try:
+            embedder._load()  # noqa: SLF001 - load now, so that a missing model falls back here and not mid-search
+        except Exception as exc:  # noqa: BLE001 - any loader failure (no network, no cache, bad name)
+            where = "is not in the local model cache (offline mode)" if offline else "could not be loaded"
+            return LsaEmbedder(), (
+                f"the embedding model {embedder.model_name} {where}: {type(exc).__name__}: {exc}; "
+                "using the built-in LSA instead"
+            )
+        return embedder, None
     return LsaEmbedder(), f"unknown embedder {spec!r}; using the built-in LSA instead"
 
 

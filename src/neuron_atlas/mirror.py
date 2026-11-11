@@ -73,10 +73,17 @@ class MirrorPlan:
     present: int = 0
     absent: int = 0
     missing: list[str] = field(default_factory=list)
+    #: Neurons without poles in the atlas (the circuit explorer knows them) whose circuit files are included.
+    circuit_neurons: list[str] = field(default_factory=list)
 
     @property
     def neurons(self) -> list[str]:
-        return list(dict.fromkeys(pid.rsplit("__", 1)[0] for pid in self.poles))
+        return list(dict.fromkeys([*(pid.rsplit("__", 1)[0] for pid in self.poles), *self.circuit_neurons]))
+
+    @property
+    def size(self) -> int:
+        """Poles plus circuit-only neurons: what a server's per-job limit counts."""
+        return len(self.poles) + len(self.circuit_neurons)
 
     def estimate(self) -> dict[str, Any]:
         """Rough size of what still has to be downloaded."""
@@ -86,6 +93,7 @@ class MirrorPlan:
         return {
             "poles": len(self.poles),
             "neurons": len(self.neurons),
+            "circuit_only_neurons": len(self.circuit_neurons),
             "files_total": len(self.files),
             "files_present": self.present,
             "files_known_absent": self.absent,
@@ -103,7 +111,9 @@ def make_plan(
     sources: Iterable[str] = SOURCES,
     *,
     include_indices: bool = True,
+    circuit_neurons: Iterable[str] = (),
 ) -> MirrorPlan:
+    """The files of the poles ``pids`` (and the circuit files of ``circuit_neurons``) and what is missing of them."""
     requested = set(sources)
     unknown = requested - set(SOURCES)
     if unknown:
@@ -116,6 +126,13 @@ def make_plan(
     for pid in poles:
         for kind, path in files_of_pole(catalog.poles[pid], sources).items():
             plan.files[path] = kind
+    if "circuit" in sources:
+        for did in dict.fromkeys(circuit_neurons):
+            n = catalog.neurons.get(did)
+            if n is None or n.circuit is None:
+                continue
+            plan.circuit_neurons.append(did)
+            plan.files.update({neuron_path(part, did): part for part in CIRCUIT_PARTS})
     statuses = source.store.statuses(plan.files)
     for path, status in statuses.items():
         if status == PRESENT:
@@ -138,6 +155,15 @@ class MirrorReport:
     seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
     cancelled: bool = False
+    #: Files left out because the run stopped on its own (see ``stopped``).
+    not_attempted: int = 0
+    #: Why the run stopped early: upstream failed many times in a row, or the disk is full.
+    stopped: str = ""
+
+    @property
+    def nothing_worked(self) -> bool:
+        """Files were due but not one could be fetched (or the run stopped on its own)."""
+        return bool(self.stopped) or (self.failed > 0 and self.fetched == 0 and self.absent == 0)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -146,10 +172,12 @@ class MirrorReport:
             "skipped": self.skipped,
             "absent": self.absent,
             "failed": self.failed,
+            "not_attempted": self.not_attempted,
             "bytes_fetched": self.bytes_fetched,
             "seconds": round(self.seconds, 2),
             "errors": self.errors[:20],
             "cancelled": self.cancelled,
+            "stopped": self.stopped,
         }
 
 
@@ -161,7 +189,11 @@ def run_plan(
     should_stop: Callable[[], bool] | None = None,
     workers: int | None = None,
 ) -> MirrorReport:
-    """Download the missing files of a plan.  Safe to interrupt and to repeat."""
+    """Download the missing files of a plan.  Safe to interrupt (Ctrl-C stops at once) and to repeat.
+
+    The run stops on its own when upstream keeps failing or the disk is full;
+    ``report.stopped`` then says why and the rest counts as ``not_attempted``.
+    """
     report = MirrorReport(requested=len(plan.missing))
     started = time.monotonic()
     lock = threading.Lock()
@@ -178,6 +210,9 @@ def run_plan(
                 report.absent += 1
             elif res.error == "cancelled":
                 report.cancelled = True
+            elif res.error.startswith("not attempted: "):
+                report.not_attempted += 1
+                report.stopped = report.stopped or res.error.removeprefix("not attempted: ")
             else:
                 report.failed += 1
                 if len(report.errors) < 200:
@@ -362,16 +397,23 @@ class MirrorJobs:
                     continue
                 job.state = "running"
             try:
-                run_plan(
+                job.report = run_plan(
                     job.plan,
                     self.source,
                     on_progress=lambda report, _res, job=job: setattr(job, "report", report),
                     should_stop=job._stop.is_set,
                 )
-                after = job.after or self.after
-                if not job._stop.is_set() and after and not self._closing:
-                    after(job)
-                job.state = "cancelled" if job._stop.is_set() else "done"
+                if job._stop.is_set():
+                    job.state = "cancelled"
+                elif job.report.nothing_worked:
+                    # Do not report success (or index anything) when not one file came through.
+                    job.state = "failed"
+                    job.error = job.report.stopped or (job.report.errors[0] if job.report.errors else "no file could be fetched")
+                else:
+                    after = job.after or self.after
+                    if after and not self._closing:
+                        after(job)
+                    job.state = "cancelled" if job._stop.is_set() else "done"
             except Exception as exc:  # noqa: BLE001 - a job must never kill the worker
                 job.state = "failed"
                 job.error = f"{type(exc).__name__}: {exc}"

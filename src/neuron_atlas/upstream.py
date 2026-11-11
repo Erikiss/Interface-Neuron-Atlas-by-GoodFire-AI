@@ -16,6 +16,7 @@ worker threads and the mirror tool from a small thread pool.
 from __future__ import annotations
 
 import contextlib
+import errno
 import gzip
 import hashlib
 import json
@@ -24,10 +25,12 @@ import re
 import sqlite3
 import threading
 import time
+import zlib
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -64,7 +67,9 @@ NEURON_FILES: dict[str, str] = {
     "circuit_incidence": "moe_circuit_explorer_data/{did}/incidence.json",
 }
 
-_SAFE_RELPATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*\.json$")
+_SAFE_RELPATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.json")
+#: The global index files: never remembered as absent on disk (a stray answer must not disable the installation).
+_INDEX_PATHS = frozenset(INDEX_FILES.values())
 _EXPLORER_ATTR = re.compile(r'data-explorer="([^"]+)"')
 
 
@@ -78,7 +83,7 @@ def neuron_path(source: str, did: str) -> str:
 
 def check_relpath(relpath: str) -> str:
     """Reject anything that is not a plain relative JSON path inside the release."""
-    if not _SAFE_RELPATH.match(relpath) or ".." in relpath or "//" in relpath:
+    if not isinstance(relpath, str) or not _SAFE_RELPATH.fullmatch(relpath) or ".." in relpath or "//" in relpath:
         raise ValueError(f"illegal atlas path: {relpath!r}")
     return relpath
 
@@ -92,6 +97,13 @@ class AtlasError(Exception):
 
 class UpstreamError(AtlasError):
     """The upstream server could not be reached or answered unexpectedly."""
+
+
+class Cancelled(AtlasError):
+    """A transfer was stopped on request (Ctrl-C, a cancelled job) before it finished."""
+
+    def __init__(self) -> None:
+        super().__init__("cancelled")
 
 
 class NotMirrored(AtlasError):
@@ -150,28 +162,83 @@ class FileInfo:
     fetched_at: float = 0.0
 
 
+#: Errors that mean a stored file is damaged (cut short, not gzip, bad checksum) or gone.
+_DAMAGED = (EOFError, OSError, zlib.error)
+
+
+def _json_like(raw: bytes) -> bool:
+    """A cheap test that ``raw`` is a JSON object or array (catches HTML pages and cut-off bodies)."""
+    body = raw.strip().removeprefix(b"\xef\xbb\xbf").strip()
+    return bool(body) and body[:1] in (b"{", b"[") and body[-1:] in (b"}", b"]")
+
+
 class Store:
-    """Gzip-compressed files of one release plus a small SQLite manifest."""
+    """Gzip-compressed files of one release plus a small SQLite manifest.
+
+    The manifest is a cache of what is on disk, not the truth: a file it calls
+    present is checked against its recorded size before it is trusted, a file
+    on disk that it does not know is checked and adopted, and a damaged
+    manifest is set aside and rebuilt.
+    """
 
     def __init__(self, root: Path):
         self.root = Path(root)
         self.files_dir = self.root / "files"
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(self.root / "manifest.sqlite", check_same_thread=False, timeout=30)
-        with self._lock:
-            self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA synchronous=NORMAL")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS files(
-                       relpath TEXT PRIMARY KEY,
-                       status TEXT NOT NULL,
-                       raw_bytes INTEGER NOT NULL DEFAULT 0,
-                       stored_bytes INTEGER NOT NULL DEFAULT 0,
-                       sha256 TEXT NOT NULL DEFAULT '',
-                       fetched_at REAL NOT NULL DEFAULT 0)"""
-            )
-            self._db.commit()
+        self.rebuilt_from: str | None = None  # name of a damaged manifest that was set aside
+        self._db = self._open_manifest()
+
+    def _open_manifest(self) -> sqlite3.Connection:
+        path = self.root / "manifest.sqlite"
+        db = sqlite3.connect(path, check_same_thread=False, timeout=30)
+        try:
+            self._prepare(db)
+            return db
+        except sqlite3.OperationalError as exc:
+            db.close()
+            if "locked" in str(exc).lower():
+                raise
+            damaged: Exception = exc
+        except sqlite3.DatabaseError as exc:
+            db.close()
+            damaged = exc
+        # Keep the damaged manifest for inspection and start a new one; the files are adopted again on demand.
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        for suffix in ("", "-wal", "-shm"):
+            old = Path(f"{path}{suffix}")
+            if old.exists():
+                old.replace(old.with_name(f"{old.name}.damaged-{stamp}"))
+        self.rebuilt_from = f"manifest.sqlite.damaged-{stamp} ({damaged})"
+        db = sqlite3.connect(path, check_same_thread=False, timeout=30)
+        self._prepare(db)
+        return db
+
+    @staticmethod
+    def _prepare(db: sqlite3.Connection) -> None:
+        deadline = time.monotonic() + 30
+        while True:  # several processes opening a fresh store at once: the WAL switch may meet a lock
+            try:
+                db.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS files(
+                   relpath TEXT PRIMARY KEY,
+                   status TEXT NOT NULL,
+                   raw_bytes INTEGER NOT NULL DEFAULT 0,
+                   stored_bytes INTEGER NOT NULL DEFAULT 0,
+                   sha256 TEXT NOT NULL DEFAULT '',
+                   fetched_at REAL NOT NULL DEFAULT 0)"""
+        )
+        db.commit()
+        check = db.execute("PRAGMA quick_check").fetchone()
+        if not check or check[0] != "ok":
+            raise sqlite3.DatabaseError(f"manifest check failed: {check[0] if check else 'no answer'}")
 
     def close(self) -> None:
         with self._lock:
@@ -180,6 +247,30 @@ class Store:
     def _file(self, relpath: str) -> Path:
         return self.files_dir / (check_relpath(relpath) + ".gz")
 
+    def _intact(self, relpath: str, stored_bytes: int) -> bool:
+        """The file of a present row exists and has the size recorded when it was written."""
+        try:
+            size = self._file(relpath).stat().st_size
+        except OSError:
+            return False
+        return stored_bytes <= 0 or size == stored_bytes
+
+    def _adopt(self, relpath: str) -> FileInfo:
+        """A file on disk that the manifest does not know (a rebuilt manifest, a copied data dir): check, record."""
+        path = self._file(relpath)
+        try:
+            raw = self.read(relpath)
+            stat = path.stat()
+        except _DAMAGED:
+            path.unlink(missing_ok=True)
+            return FileInfo(relpath, UNKNOWN)
+        if not _json_like(raw):
+            path.unlink(missing_ok=True)
+            return FileInfo(relpath, UNKNOWN)
+        info = FileInfo(relpath, PRESENT, len(raw), stat.st_size, hashlib.sha256(raw).hexdigest(), stat.st_mtime)
+        self._record(info)
+        return info
+
     def info(self, relpath: str) -> FileInfo:
         with self._lock:
             row = self._db.execute(
@@ -187,27 +278,38 @@ class Store:
                 (relpath,),
             ).fetchone()
         if row is None:
-            return FileInfo(relpath, UNKNOWN)
+            return self._adopt(relpath) if self._file(relpath).exists() else FileInfo(relpath, UNKNOWN)
         info = FileInfo(*row)
-        if info.status == PRESENT and not self._file(relpath).exists():
-            return FileInfo(relpath, UNKNOWN)  # deleted behind our back
+        if info.status == PRESENT and not self._intact(relpath, info.stored_bytes):
+            self.forget(relpath)  # deleted or damaged behind our back
+            return FileInfo(relpath, UNKNOWN)
         return info
 
     def status(self, relpath: str) -> str:
         return self.info(relpath).status
 
     def statuses(self, relpaths: Iterable[str]) -> dict[str, str]:
-        """Manifest status of many files at once (does not stat the files)."""
+        """Status of many files at once (present rows are checked against the files on disk)."""
         wanted = list(relpaths)
         out = dict.fromkeys(wanted, UNKNOWN)
+        rows: dict[str, tuple[str, int]] = {}
         with self._lock:
             for i in range(0, len(wanted), 500):
                 chunk = wanted[i : i + 500]
                 marks = ",".join("?" * len(chunk))
-                for relpath, status in self._db.execute(
-                    f"SELECT relpath,status FROM files WHERE relpath IN ({marks})", chunk
+                for relpath, status, stored in self._db.execute(
+                    f"SELECT relpath,status,stored_bytes FROM files WHERE relpath IN ({marks})", chunk
                 ):
-                    out[relpath] = status
+                    rows[relpath] = (status, stored)
+        for relpath in wanted:
+            row = rows.get(relpath)
+            if row is None:
+                if self._file(relpath).exists():
+                    out[relpath] = self._adopt(relpath).status
+            elif row[0] == PRESENT and not self._intact(relpath, row[1]):
+                self.forget(relpath)
+            else:
+                out[relpath] = row[0]
         return out
 
     def read(self, relpath: str) -> bytes:
@@ -218,9 +320,17 @@ class Store:
         path = self._file(relpath)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        with open(tmp, "wb") as fh, gzip.GzipFile(fileobj=fh, mode="wb", compresslevel=6, mtime=0) as gz:
-            gz.write(raw)
-        os.replace(tmp, path)
+        try:
+            with open(tmp, "wb") as fh:
+                with gzip.GzipFile(fileobj=fh, mode="wb", compresslevel=6, mtime=0) as gz:
+                    gz.write(raw)
+                fh.flush()
+                os.fsync(fh.fileno())  # a power cut must not leave a cut-off file behind a "present" row
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
         info = FileInfo(
             relpath, PRESENT, len(raw), path.stat().st_size, hashlib.sha256(raw).hexdigest(), time.time()
         )
@@ -272,6 +382,65 @@ class Store:
 
 
 # --------------------------------------------------------------------------- the source
+
+#: A bulk fetch stops when this many files in a row failed (upstream down, blocking us, or a portal in the way).
+BREAKER_FAILURES = 12
+#: Longest pause honoured when upstream asks to slow down (Retry-After); a longer request ends the run.
+MAX_PAUSE_SECONDS = 600.0
+#: Local errors after which no further file is requested in a bulk fetch (the disk cannot take more).
+_FATAL_DISK = frozenset(
+    code for code in (errno.ENOSPC, errno.EROFS, errno.EACCES, errno.EPERM, getattr(errno, "EDQUOT", None)) if code
+)
+
+
+def _wait(seconds: float, stop: threading.Event | None) -> None:
+    """Sleep, but give up at once with :class:`Cancelled` when ``stop`` is set."""
+    if seconds <= 0:
+        return
+    if stop is None:
+        time.sleep(seconds)
+    elif stop.wait(seconds):
+        raise Cancelled()
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    """Seconds a Retry-After header asks for (number or HTTP date), if any."""
+    value = resp.headers.get("retry-after", "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return float(value)
+    try:
+        return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def release_base(explorer_url: str) -> str:
+    """The release prefix of the explorer URL a page names, e.g. ``https://static.goodfire.ai/neuron-atlas/<id>/``.
+
+    Only an https URL on an allowed host, with a file name below at least one
+    directory and without ``.``/``..`` segments, user names or odd ports is accepted.
+    """
+    try:
+        parts = urlsplit(explorer_url)
+        port = parts.port
+    except ValueError as exc:
+        raise UpstreamError(f"unexpected explorer location {explorer_url!r}") from exc
+    segments = parts.path.split("/")
+    if (
+        parts.scheme != "https"
+        or parts.hostname not in ALLOWED_RELEASE_HOSTS
+        or parts.username is not None
+        or parts.password is not None
+        or port not in (None, 443)
+        or len(segments) < 3
+        or segments[0] != ""
+        or not segments[-1]
+        or any(seg in ("", ".", "..") for seg in segments[1:-1])
+    ):
+        raise UpstreamError(f"unexpected explorer location {explorer_url!r}")
+    return f"https://{parts.hostname}{'/'.join(segments[:-1])}/"
 
 
 @dataclass(frozen=True)
@@ -335,6 +504,11 @@ class AtlasSource:
         self._json = _Lru(json_cache_size)
         self._inflight: dict[str, threading.Lock] = {}
         self._inflight_lock = threading.Lock()
+        #: Index files upstream did not have, remembered for this process only (see _INDEX_PATHS).
+        self._absent_now: set[str] = set()
+        #: Until this time (monotonic) no request goes out: upstream asked every client to slow down.
+        self._pause_until = 0.0
+        self._pause_lock = threading.Lock()
         self.network_requests = 0
 
     # ------------------------------------------------------------------ plumbing
@@ -436,11 +610,7 @@ class AtlasSource:
         m = _EXPLORER_ATTR.search(resp.text)
         if not m:
             raise UpstreamError("the atlas page no longer names an explorer URL")
-        parts = urlsplit(m.group(1))
-        if parts.scheme != "https" or parts.hostname not in ALLOWED_RELEASE_HOSTS:
-            raise UpstreamError(f"unexpected explorer location {m.group(1)!r}")
-        base = m.group(1).rsplit("/", 1)[0] + "/"
-        return base
+        return release_base(m.group(1))
 
     # ------------------------------------------------------------------ reading
 
@@ -456,37 +626,62 @@ class AtlasSource:
             return False
         return self.settings.allow_remote_fetch if remote is None else remote
 
-    def get_bytes(self, relpath: str, *, remote: bool | None = None, refresh: bool = False) -> bytes | None:
+    def get_bytes(
+        self,
+        relpath: str,
+        *,
+        remote: bool | None = None,
+        refresh: bool = False,
+        stop: threading.Event | None = None,
+    ) -> bytes | None:
         """Raw JSON bytes of ``relpath`` or ``None`` when upstream has no such file.
 
         ``remote`` overrides :attr:`Settings.allow_remote_fetch` for this call;
-        ``refresh`` re-downloads even when the file is mirrored.
+        ``refresh`` re-downloads even when the file is mirrored; ``stop`` cancels
+        waits (back-off, pauses) when it is set.  A damaged stored copy is
+        dropped and fetched again.
         """
         check_relpath(relpath)
-        store = self.store
         if not refresh:
-            status = store.status(relpath)
-            if status == PRESENT:
-                return store.read(relpath)
-            if status == ABSENT:
-                return None
+            raw, known = self._stored(relpath)
+            if known:
+                return raw
         if not self.can_fetch(remote):
             raise NotMirrored(relpath)
         with self._inflight_guard(relpath):
             if not refresh:  # another thread may have fetched it meanwhile
-                status = store.status(relpath)
-                if status == PRESENT:
-                    return store.read(relpath)
-                if status == ABSENT:
-                    return None
-            raw = self._download(relpath)
+                raw, known = self._stored(relpath)
+                if known:
+                    return raw
+            raw = self._download(relpath, stop)
+            store = self.store
             if raw is None:
-                store.mark_absent(relpath)
+                if relpath in _INDEX_PATHS:
+                    self._absent_now.add(relpath)
+                else:
+                    store.mark_absent(relpath)
                 self._json.drop(relpath)
                 return None
+            self._absent_now.discard(relpath)
             store.write(relpath, raw)
             self._json.drop(relpath)
             return raw
+
+    def _stored(self, relpath: str) -> tuple[bytes | None, bool]:
+        """``(bytes, True)`` for a mirrored file, ``(None, True)`` for a known absent one, else ``(None, False)``."""
+        store = self.store
+        if relpath in self._absent_now:
+            return None, True
+        status = store.status(relpath)
+        if status == ABSENT and relpath not in _INDEX_PATHS:
+            return None, True
+        if status == PRESENT:
+            try:
+                return store.read(relpath), True
+            except _DAMAGED:
+                store.forget(relpath)  # cut short or overwritten: fetch it again
+                self._json.drop(relpath)
+        return None, False
 
     def get_json(self, relpath: str, *, remote: bool | None = None, refresh: bool = False) -> Any:
         """Parsed JSON of ``relpath`` or ``None`` when upstream has no such file."""
@@ -525,33 +720,87 @@ class AtlasSource:
         on_result: Callable[[FetchResult], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
     ) -> list[FetchResult]:
-        """Make sure many files are mirrored.  Never raises for a single file."""
+        """Make sure many files are mirrored.  Never raises for a single file.
+
+        This is the explicit mirror path, so it fetches even where
+        ``allow_remote_fetch`` forbids read-through (never in offline mode).
+        Files that are not tried come back as errors: ``cancelled`` when
+        ``should_stop()`` turned true, ``not attempted: …`` when the run stopped
+        on its own - after :data:`BREAKER_FAILURES` failures in a row (upstream
+        down, blocking us, a portal in the way) or when the disk refuses files.
+        An exception in the calling thread (Ctrl-C) cancels everything that has
+        not started and is raised again at once.
+        """
         todo = list(dict.fromkeys(relpaths))
-        results: list[FetchResult] = []
         known = {} if refresh else self.store.statuses(todo)
+        results: list[FetchResult] = []
+        stop = threading.Event()
+        lock = threading.Lock()
+        state: dict[str, Any] = {"failures": 0, "reason": ""}
+        online = self.can_fetch(remote=True)
+
+        def halt(reason: str) -> None:
+            with lock:
+                state["reason"] = state["reason"] or reason
+            stop.set()
+
+        def skipped(relpath: str) -> FetchResult:
+            reason = state["reason"]
+            return FetchResult(relpath, "error", error=f"not attempted: {reason}" if reason else "cancelled")
 
         def one(relpath: str) -> FetchResult:
-            if should_stop and should_stop():
-                return FetchResult(relpath, "error", error="cancelled")
             before = known.get(relpath, UNKNOWN)
             if before in (PRESENT, ABSENT) and not refresh:
                 return FetchResult(relpath, before)
+            if not online:
+                return FetchResult(relpath, "error", error="offline mode: not fetched")
+            if not stop.is_set() and should_stop and should_stop():
+                stop.set()
+            if stop.is_set():
+                return skipped(relpath)
             try:
-                raw = self.get_bytes(relpath, refresh=refresh)
+                raw = self.get_bytes(relpath, refresh=refresh, remote=True, stop=stop)
+            except Cancelled:
+                return skipped(relpath)
             except AtlasError as exc:
-                return FetchResult(relpath, "error", error=str(exc))
-            if raw is None:
-                return FetchResult(relpath, ABSENT, fetched=True)
-            return FetchResult(relpath, PRESENT, fetched=True, raw_bytes=len(raw))
+                failure = str(exc)
+            except OSError as exc:
+                failure = f"could not store the file: {exc}"
+                if exc.errno in _FATAL_DISK:
+                    halt(f"the local disk refuses new files ({exc.strerror or exc})")
+            except Exception as exc:  # noqa: BLE001 - one odd file must not end the run
+                failure = f"{type(exc).__name__}: {exc}"
+            else:
+                with lock:
+                    state["failures"] = 0
+                if raw is None:
+                    return FetchResult(relpath, ABSENT, fetched=True)
+                return FetchResult(relpath, PRESENT, fetched=True, raw_bytes=len(raw))
+            with lock:
+                state["failures"] += 1
+                tripped = state["failures"] >= BREAKER_FAILURES
+            if tripped:
+                halt(f"{BREAKER_FAILURES} files in a row failed, the last with: {failure}")
+            return FetchResult(relpath, "error", error=failure)
 
         n = max(1, workers or self.settings.max_concurrency)
-        with ThreadPoolExecutor(max_workers=n, thread_name_prefix="atlas-fetch") as pool:
-            futures = [pool.submit(one, p) for p in todo]
-            for fut in as_completed(futures):
-                res = fut.result()
-                results.append(res)
-                if on_result:
-                    on_result(res)
+        pool = ThreadPoolExecutor(max_workers=n, thread_name_prefix="atlas-fetch")
+        try:
+            pending = {pool.submit(one, p) for p in todo}
+            while pending:
+                done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    res = fut.result()
+                    results.append(res)
+                    if on_result:
+                        on_result(res)
+                if should_stop and not stop.is_set() and should_stop():
+                    stop.set()  # also wakes workers that wait for a retry or a pause
+        except BaseException:
+            stop.set()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
         return results
 
     # ------------------------------------------------------------------ network
@@ -566,13 +815,29 @@ class AtlasSource:
                         del self._inflight[key]
         return lock
 
-    def _download(self, relpath: str) -> bytes | None:
+    def _pause(self, seconds: float) -> None:
+        """Hold back every request of this source for ``seconds`` (upstream asked to slow down)."""
+        with self._pause_lock:
+            self._pause_until = max(self._pause_until, time.monotonic() + seconds)
+
+    def _wait_for_pause(self, stop: threading.Event | None) -> None:
+        while True:
+            with self._pause_lock:
+                left = self._pause_until - time.monotonic()
+            if left <= 0:
+                return
+            _wait(min(left, 5.0), stop)
+
+    def _download(self, relpath: str, stop: threading.Event | None = None) -> bytes | None:
         url = self.url_for(relpath)
         retries = max(0, self.settings.max_retries)
         last = ""
         for attempt in range(retries + 1):
             if attempt:
-                time.sleep(min(30.0, 0.75 * 2 ** (attempt - 1)))
+                _wait(min(30.0, 0.75 * 2 ** (attempt - 1)), stop)
+            self._wait_for_pause(stop)
+            if stop is not None and stop.is_set():
+                raise Cancelled()
             with self._slots:
                 self._limiter.acquire()
                 self.network_requests += 1
@@ -583,14 +848,21 @@ class AtlasSource:
                     continue
             code = resp.status_code
             if code == 200:
+                if not _json_like(resp.content) or "html" in resp.headers.get("content-type", "").lower():
+                    raise UpstreamError(
+                        f"{url} answered 200 without JSON ({resp.headers.get('content-type', 'no content type')}); "
+                        "a proxy or login portal in the way?"
+                    )
                 return resp.content
-            if code == 404 or (code == 403 and _is_s3_missing(resp)):
+            if code in (403, 404) and _is_s3_missing(resp):
                 return None
             if code in (408, 425, 429, 500, 502, 503, 504):
                 last = f"HTTP {code}"
-                retry_after = resp.headers.get("retry-after", "")
-                if retry_after.isdigit():
-                    time.sleep(min(60.0, float(retry_after)))
+                if code in (429, 503):  # a request to every client of ours: pause them all
+                    delay = _retry_after(resp)
+                    if delay is not None and delay > MAX_PAUSE_SECONDS:
+                        raise UpstreamError(f"{url}: upstream asks to wait {delay:.0f} s (HTTP {code}); try again later")
+                    self._pause(delay if delay is not None else min(60.0, 2.0 * 2**attempt))
                 continue
             raise UpstreamError(f"{url} answered HTTP {code}")
         raise UpstreamError(f"{url} failed after {retries + 1} attempts ({last})")
@@ -628,10 +900,12 @@ def _without_lone_surrogates(value: Any) -> Any:
 
 
 def _is_s3_missing(resp: httpx.Response) -> bool:
-    """The release bucket answers 403 *AccessDenied* for keys that do not exist.
+    """The release bucket answers 403 *AccessDenied* (404 *NoSuchKey* where listing is allowed) for missing keys.
 
-    A 403 from anything else (a proxy, a WAF) must not be mistaken for "absent".
+    A 403 or 404 from anything else (a proxy, a WAF, a portal, a CDN error page)
+    must not be mistaken for "absent": that mark is kept.
     """
     if "amazons3" not in resp.headers.get("server", "").lower():
         return False
-    return b"<Code>AccessDenied</Code>" in resp.content[:2048]
+    head = resp.content[:2048]
+    return b"<Code>AccessDenied</Code>" in head or b"<Code>NoSuchKey</Code>" in head

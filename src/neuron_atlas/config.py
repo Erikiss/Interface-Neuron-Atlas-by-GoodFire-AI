@@ -170,5 +170,6 @@ def _normalise_release(url: str | None) -> str | None:
 def release_id(release_url: str) -> str:
     """Stable directory name for a release, e.g. ``2026-11-09-082204``."""
     tail = release_url.rstrip("/").rsplit("/", 1)[-1]
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in tail)
-    return safe or "release"
+    safe = "".join(c if (c.isascii() and c.isalnum()) or c in "-_." else "_" for c in tail)
+    # No ".", ".." or hidden names: the id becomes a directory inside the data directory.
+    return safe.strip(".") or "release"

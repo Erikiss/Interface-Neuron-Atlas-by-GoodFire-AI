@@ -29,8 +29,8 @@ _DID = re.compile(
     re.IGNORECASE,
 )
 _BARE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*$")
-_CANON_DID = re.compile(r"^L\d+_(?:E\d+|shared)_N\d+$")
-_CANON_PID = re.compile(r"^L\d+_(?:E\d+|shared)_N\d+__(?:pos|neg)$")
+_CANON_DID = re.compile(r"L[0-9]+_(?:E[0-9]+|shared)_N[0-9]+")
+_CANON_PID = re.compile(r"L[0-9]+_(?:E[0-9]+|shared)_N[0-9]+__(?:pos|neg)")
 _POLE_SUFFIX = re.compile(r"(?:__|[\s_/.,:;|-]+)(pos|neg|positive|negative)\s*(?:pole)?\s*$", re.IGNORECASE)
 _POLE_PREFIX = re.compile(r"^\s*([+\-−–])\s*")
 _POLE_TAIL_SIGN = re.compile(r"\s*([+\-−–])\s*$")
@@ -72,11 +72,11 @@ def pole_sign(pole: str) -> str:
 
 
 def is_did(text: str) -> bool:
-    return bool(_CANON_DID.match(text))
+    return isinstance(text, str) and _CANON_DID.fullmatch(text) is not None
 
 
 def is_pid(text: str) -> bool:
-    return bool(_CANON_PID.match(text))
+    return isinstance(text, str) and _CANON_PID.fullmatch(text) is not None
 
 
 def split_pid(pid: str) -> tuple[str, str]:

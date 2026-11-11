@@ -24,3 +24,6 @@ htmlcov/
 .vscode/
 .DS_Store
 .env
+
+# Agent worktrees (Claude Code)
+/.claude/worktrees/

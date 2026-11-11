@@ -207,3 +207,24 @@ def test_semantic_search_and_similarity(atlas):
 def test_the_page_size_is_clamped(atlas, settings):
     atlas.settings = settings.with_overrides(max_page_size=2)
     assert len(atlas.search(SearchQuery(limit=500)).hits) == 2
+
+
+def test_the_model_loader_stays_offline_and_falls_back_to_lsa(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from neuron_atlas.semantic import FastEmbedEmbedder, LsaEmbedder, make_embedder
+
+    calls = []
+
+    class TextEmbedding:
+        def __init__(self, model_name, cache_dir=None, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("local_files_only"):
+                raise ValueError("model not found in the cache")
+
+    monkeypatch.setitem(sys.modules, "fastembed", types.SimpleNamespace(TextEmbedding=TextEmbedding))
+    embedder, note = make_embedder("fastembed", model_dir=tmp_path, offline=True)
+    assert isinstance(embedder, LsaEmbedder) and "offline" in note and calls == [{"local_files_only": True}]
+    online, note = make_embedder("fastembed", model_dir=tmp_path)
+    assert isinstance(online, FastEmbedEmbedder) and note is None and calls[-1] == {}
