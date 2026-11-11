@@ -25,8 +25,26 @@ function saveDraft(draft) {
   }
 }
 
-function cell(text) {
-  return String(text ?? '').replace(/\|/g, '\\|').replace(/\s*\n+\s*/g, ' ').trim();
+/**
+ * Text as literal Markdown on one line: '&' and '<' become entities, so no tag or entity in atlas text
+ * reaches a renderer that keeps HTML ('Repeated <td> sibling tags' stays one table cell and shows its tag);
+ * the characters of Markdown's inline syntax and of table cells are backslash-escaped; line breaks become
+ * spaces (a table row is one line).
+ */
+function mdText(text) {
+  return String(text ?? '')
+    .split(/\r\n|\r|\n/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/[\\`*_[\]|~#$]/g, '\\$&');
+}
+
+/** A note as a paragraph of its own: also nothing at its start that would open a list, a quote or a heading. */
+function mdLine(text) {
+  return mdText(text).replace(/^(\d{1,9})([.)])/, '$1\\$2').replace(/^[-+>=]/, '\\$&');
 }
 
 function shorten(text, n = 180) {
@@ -41,21 +59,23 @@ function bestText(hit) {
   return { text: hit.headline || hit.description || '', mode: null, share: null };
 }
 
+/** Every value from the server goes through mdText(): labels, snippets and notes are atlas text. */
 function toMarkdown(queries, results, groupBy) {
   const out = [];
   results.forEach((res, i) => {
-    out.push(`## ${queries[i]}`, '', `${res.total} ${groupBy === 'mode' ? 'modes' : 'poles'} · ${fmtNum(res.took_ms, 1)} ms`, '');
+    out.push(`## ${mdText(queries[i])}`, '', `${mdText(res.total)} ${groupBy === 'mode' ? 'modes' : 'poles'} · ${fmtNum(res.took_ms, 1)} ms`, '');
     if (groupBy === 'mode') {
       out.push('| # | Pole | Mode | Share | Label |', '|---|------|------|-------|-------|');
-      (res.modes || []).forEach((m, k) => out.push(`| ${k + 1} | ${signChar(m.pole)} ${displayId(m.pid)} | ${m.mode_index} | ${m.share == null ? '' : (m.share * 100).toFixed(1) + '%'} | ${cell(m.label)} |`));
+      (res.modes || []).forEach((m, k) => out.push(`| ${k + 1} | ${mdText(`${signChar(m.pole)} ${displayId(m.pid)}`)} | ${mdText(m.mode_index)} | ${typeof m.share === 'number' ? (m.share * 100).toFixed(1) + '%' : ''} | ${mdText(m.label)} |`));
     } else {
       out.push('| # | Pole | Category | Modes | Text |', '|---|------|----------|-------|------|');
       (res.hits || []).forEach((hit, k) => {
         const b = bestText(hit);
-        out.push(`| ${k + 1} | ${signChar(hit.pole)} ${displayId(hit.pid)} | ${hit.category} | ${hit.n_modes ?? ''} | ${b.mode != null ? `[mode ${b.mode}] ` : ''}${cell(shorten(b.text, 240))} |`);
+        out.push(`| ${k + 1} | ${mdText(`${signChar(hit.pole)} ${displayId(hit.pid)}`)} | ${mdText(hit.category)} | ${mdText(hit.n_modes)} | ${mdText(`${b.mode != null ? `[mode ${b.mode}] ` : ''}${shorten(b.text, 240)}`)} |`);
       });
     }
-    if ((res.notes || []).length) out.push('', ...res.notes.map((n) => `> ${n}`));
+    const notes = (res.notes || []).filter((n) => typeof n === 'string' && n.trim());
+    if (notes.length) out.push('', ...notes.flatMap((n, j) => (j ? ['>', `> ${mdLine(n)}`] : [`> ${mdLine(n)}`])));
     out.push('');
   });
   return out.join('\n');

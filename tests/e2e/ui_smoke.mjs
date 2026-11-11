@@ -188,6 +188,46 @@ function printClipping(page) {
   });
 }
 
+/** The width of an A4 page between the 13 mm side margins of the print stylesheet's @page, in CSS px. */
+const PAPER_W = Math.floor(((210 - 26) / 25.4) * 96);
+
+/**
+ * Lay the page out as printed on A4 (print media at the paper's content width): the document's width, the
+ * elements whose right edge passes the page (a wider printout makes the browser shrink all of it; an
+ * element clipped by an ancestor does not count), and the controls that would show on paper.
+ */
+async function printOverflow(page) {
+  const size = page.viewportSize();
+  await page.setViewportSize({ width: PAPER_W, height: 1000 });
+  await page.emulateMedia({ media: 'print' });
+  try {
+    return await page.evaluate((W) => {
+      window.dispatchEvent(new Event('beforeprint'));
+      const clipped = (el) => {
+        for (let e = el.parentElement; e && e !== document.body; e = e.parentElement) if (getComputedStyle(e).overflowX !== 'visible') return true;
+        return false;
+      };
+      const name = (el) => `${el.tagName.toLowerCase()}.${String(el.className.baseVal ?? el.className).split(' ').slice(0, 2).join('.')}`;
+      const past = [];
+      for (const el of document.querySelectorAll('main *')) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.right > W + 1 && !clipped(el)) past.push(`${name(el)} right=${Math.round(r.right)}`);
+      }
+      // the rows of the map legend are buttons, and content
+      const controls = [...document.querySelectorAll('main :is(button, input, select, textarea)')].filter((el) => {
+        const r = el.getBoundingClientRect();
+        return (r.width > 0 || r.height > 0) && !el.classList.contains('legend-btn');
+      }).map((el) => `${name(el)}: ${(el.textContent || el.value || '').trim().slice(0, 30)}`);
+      const scrollW = document.documentElement.scrollWidth;
+      window.dispatchEvent(new Event('afterprint'));
+      return { W, scrollW, past: [...new Set(past)], controls };
+    }, PAPER_W);
+  } finally {
+    await page.emulateMedia({ media: 'screen' });
+    if (size) await page.setViewportSize(size);
+  }
+}
+
 async function main() {
   const health = await fetch(`${BASE}/healthz`).then((r) => r.ok).catch(() => false);
   if (!health) {
@@ -301,6 +341,48 @@ async function main() {
     const poles = (await getJson(page, '/api/v1/search?limit=0')).total;
     await page.waitForFunction((n) => document.querySelector('[data-action="export"]').textContent.replace(/\D/g, '') === String(n), poles, { timeout: 5000 });
     assert(await page.locator('.facet-unit').isVisible(), 'facet counts are not said to count poles');
+    // grouping typed into the query (group:mode): the export still streams every pole of the search
+    const inline = encodeURIComponent(`${QUERY} group:mode`);
+    await page.goto(`${BASE}/#/search?q=${inline}`);
+    await page.waitForSelector('.hit-mode', { timeout: 8000 });
+    await settled(page);
+    const want = (await getJson(page, `/api/v1/search?q=${Q}&limit=0`)).total;
+    const rows = (await getText(page, `/api/v1/export?q=${inline}&format=ndjson`)).split('\n').filter((l) => l.trim()).length;
+    assert(rows === want, `the export of "${QUERY} group:mode" has ${rows} rows, the search ${want} poles`);
+    await page.waitForFunction((n) => document.querySelector('[data-action="export"]').textContent.replace(/\D/g, '') === String(n), want, { timeout: 5000 })
+      .catch(async () => { throw new Error(`export button says "${await page.locator('[data-action="export"]').innerText()}" for "${QUERY} group:mode", the export streams ${want} poles`); });
+    // and with nothing else in the query: all modes against all poles, two different numbers on any atlas
+    await page.goto(`${BASE}/#/search?q=${encodeURIComponent('group:mode')}`);
+    await page.waitForSelector('.hit-mode', { timeout: 8000 });
+    await page.waitForFunction((n) => document.querySelector('[data-action="export"]').textContent.replace(/\D/g, '') === String(n), poles, { timeout: 5000 })
+      .catch(async () => { throw new Error(`export button says "${await page.locator('[data-action="export"]').innerText()}" for "group:mode", the export streams ${poles} poles`); });
+    await page.goto(`${BASE}/#/search?q=${Q}`);
+    await page.waitForSelector('.hit-pole mark', { timeout: 8000 });
+    await settled(page);
+  }, page);
+
+  await check('search page in print: the search text, every match, no controls, nothing past the page', async () => {
+    // a query with a filter chip and hits with more than three matches
+    await page.goto(`${BASE}/#/search?q=${Q}&pole=neg`);
+    await page.waitForSelector('.hit-pole', { timeout: 8000 });
+    await settled(page);
+    const printed = await printOverflow(page);
+    assert(printed.scrollW <= printed.W && !printed.past.length, `the printout is wider than the page (${printed.W} px): ${printed.scrollW} px, ${printed.past.slice(0, 3).join('; ')}`);
+    assert(!printed.controls.length, `controls on paper: ${printed.controls.slice(0, 4).join('; ')}`);
+    await page.emulateMedia({ media: 'print' });
+    const paper = await page.evaluate(() => ({
+      query: document.querySelector('.print-query')?.textContent || '',
+      queryShown: getComputedStyle(document.querySelector('.print-query')).display !== 'none',
+      chips: document.querySelectorAll('.chips .chip').length,
+      hiddenMatches: [...document.querySelectorAll('.hits .match:not(.match-more)')].filter((m) => getComputedStyle(m).display === 'none').length,
+      extra: document.querySelectorAll('.hits .match-extra').length,
+    }));
+    await page.emulateMedia({ media: 'screen' });
+    assert(paper.queryShown && paper.query.includes(QUERY), `the search text is not on paper: ${JSON.stringify(paper)}`);
+    assert(paper.chips >= 1, 'the filters are not on paper');
+    assert(paper.hiddenMatches === 0, `${paper.hiddenMatches} matches missing on paper (behind "+N more")`);
+    // on screen the extra matches still wait behind "+N more"
+    if (paper.extra) assert(await page.evaluate(() => [...document.querySelectorAll('.hits .match-extra')].every((m) => getComputedStyle(m).display === 'none')), 'matches past the third are shown on screen');
     await page.goto(`${BASE}/#/search?q=${Q}`);
     await page.waitForSelector('.hit-pole mark', { timeout: 8000 });
     await settled(page);
@@ -516,44 +598,104 @@ async function main() {
     await page.waitForFunction(() => !document.getElementById('tooltip').hidden, null, { timeout: 3000 });
   }, page);
 
-  await check('copying a passage gives exactly its text (original characters, no buttons)', async () => {
+  await check('copying a passage gives exactly its text: every passage of the pole (NBSP, a final newline, no buttons)', async () => {
     if (!mirrored) return;
-    // a passage with all its tokens shown (not cut to a window), with control characters if there is one;
-    // before the tokens comes the end of its preceding context, if it has one
-    const pick = await page.evaluate(async (pid) => {
-      const d = await (await fetch(`/api/v1/poles/${encodeURIComponent(pid)}?include=modes,examples,tokens&max_examples=3`)).json();
-      const found = [];
-      let k = 0;
-      for (const m of d.modes || []) {
-        for (const e of m.examples || []) {
-          const toks = e.tokens || [];
-          if (toks.length && !(toks.length > 108 && Number.isInteger(e.focal_index))) found.push({ index: k, text: toks.map((x) => x[0]).join(''), pre: e.pre || '' });
-          k++;
-        }
-      }
-      return found.find((f) => /[\u0001-\u0008\u000b-\u001f\u007f-\u009f]/.test(f.text)) || found[0] || null;
-    }, POLE);
-    if (pick) {
-      const strip = (s) => s.replace(/\u0000/g, '');
-      const text = strip(await copyContents(page, '#panel-modes .example .ex-text', pick.index));
-      const tokens = strip(pick.text);
-      const context = text.slice(0, Math.max(0, text.length - tokens.length));
-      assert(text.endsWith(tokens) && strip(pick.pre).endsWith(context), `copied ${JSON.stringify(text.slice(-60))} instead of ${JSON.stringify(tokens.slice(-60))}`);
-    }
-    // a passage with buttons in or next to it ("…" before the context, "show full context"): only its text
-    for (const [tab, sel] of [['modes', '#panel-modes .ex-text:has(.ex-pre-toggle)'], ['islands', '#panel-islands .ex-text:has(.ex-cut)']]) {
+    // Every passage box of the modes, subcircuits and islands tabs against the API: the end of the preceding
+    // context the box shows, then its tokens (the window around the firing token of a long passage).
+    const bad = [];
+    let copied = 0;
+    for (const tab of ['modes', 'subcircuits', 'islands']) {
       await page.locator(`#tab-${tab}`).click();
       await page.waitForSelector(`#panel-${tab}[data-ready="1"]`, { timeout: 10000 });
-      if (await count(page, sel) === 0) continue;
-      const want = await page.evaluate((s) => {
-        const walk = (n) => [...n.childNodes].map((c) => (c.nodeType === 3 ? c.data : c.nodeType === 1 && c.tagName !== 'BUTTON' ? walk(c) : '')).join('');
-        return walk(document.querySelector(s));
-      }, sel);
-      const index = await page.evaluate(([s, all]) => [...document.querySelectorAll(all)].indexOf(document.querySelector(s)), [sel, `#panel-${tab} .ex-text`]);
-      const text = await copyContents(page, `#panel-${tab} .ex-text`, index);
-      assert(text.replace(/\u0000/g, '') === want.replace(/\u0000/g, ''), `${tab}: copied ${JSON.stringify(text.slice(0, 50))}…${JSON.stringify(text.slice(-50))} instead of the passage`);
+      const want = await page.evaluate(async ([pid, tab]) => {
+        const d = await (await fetch(`/api/v1/poles/${encodeURIComponent(pid)}?include=${tab === 'modes' ? 'modes' : tab},examples,tokens&max_examples=3`)).json();
+        // the islands view lists the islands of each mode, then the rest
+        const islandOrder = (view) => {
+          const out = [];
+          const byId = new Map((view.islands || []).map((i) => [i.id, i]));
+          const used = new Set();
+          for (const m of view.modes || []) for (const id of m.islands || []) if (byId.has(id) && !used.has(id)) { used.add(id); out.push(...(byId.get(id).examples || [])); }
+          for (const i of view.islands || []) if (!used.has(i.id)) out.push(...(i.examples || []));
+          return out;
+        };
+        let exs = [];
+        // a pole without modes shows its islands on the modes tab
+        if (tab === 'modes') exs = (d.modes || []).length ? d.modes.flatMap((m) => m.examples || []) : islandOrder(d.islands || {});
+        if (tab === 'subcircuits') exs = (d.subcircuits || []).flatMap((s) => s.examples || []);
+        if (tab === 'islands') exs = islandOrder(d.islands || {});
+        return exs.map((e) => {
+          let pre = e.pre || '';
+          if (pre.length > 190) {
+            let cut = pre.length - 150;
+            const ws = pre.slice(cut, cut + 30).search(/\s/);
+            if (ws >= 0) cut += ws + 1;
+            pre = pre.slice(cut);
+          }
+          const toks = e.tokens || [];
+          if (!toks.length) return pre + (e.focal_token != null ? String(e.text || '').replace(`«${e.focal_token}»`, e.focal_token) : String(e.text || ''));
+          const focal = Number.isInteger(e.focal_index) ? e.focal_index : -1;
+          const long = toks.length > 108 && focal >= 0;
+          const from = long ? Math.max(0, focal - 56) : 0;
+          const to = long ? Math.min(toks.length, focal + 29) : toks.length;
+          return pre + toks.slice(from, to).map((x) => x[0]).join('');
+        });
+      }, [POLE, tab]);
+      const boxes = await count(page, `#panel-${tab} .ex-text`);
+      if (boxes !== want.length) bad.push(`${tab}: ${boxes} passages shown, the API has ${want.length}`);
+      for (let i = 0; i < Math.min(boxes, want.length); i++) {
+        const text = await copyContents(page, `#panel-${tab} .ex-text`, i);
+        copied++;
+        if (text !== want[i]) bad.push(`${tab} #${i}: copied ${JSON.stringify(text.slice(-40))} (${text.length}) instead of ${JSON.stringify(want[i].slice(-40))} (${want[i].length})`);
+      }
     }
     await page.locator('#tab-modes').click();
+    assert(copied > 0, 'no passage copied');
+    assert(!bad.length, `${bad.length} of ${copied} passages copy inexactly, e.g. ${bad.slice(0, 2).join('; ')}`);
+  }, page);
+
+  await check('copying keeps no-break spaces, control characters and a final newline (whole box, part of it, a mouse drag)', async () => {
+    // a passage of our own, so that every case is there on any atlas
+    const tokens = ['A\u00a0\u00a0B', ' x\u0007y', '\u00a0', ' end', '\n'];
+    const whole = tokens.join('');
+    await page.evaluate(async (toks) => {
+      const { renderExample } = await import('/static/js/tokens.js');
+      const ex = renderExample({ a_rel: 2, text: '', focal_index: 1, tokens: toks.map((x, i) => [x, i + 1]) }, { pole: 'pos', vmax: 5 });
+      ex.id = 'copy-probe';
+      document.querySelector('main').prepend(ex);
+    }, tokens);
+    try {
+      const box = '#copy-probe .ex-text';
+      assert(await copyContents(page, box, 0) === whole, 'the whole box does not copy exactly');
+      // from inside the first token to inside the fourth
+      await page.evaluate(() => {
+        const toks = document.querySelectorAll('#copy-probe .tok');
+        const range = document.createRange();
+        range.setStart(toks[0].firstChild, 1);
+        range.setEnd(toks[3].firstChild, 3);
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+      });
+      await page.keyboard.press('Control+C');
+      const part = await clipboard(page);
+      assert(part === whole.slice(1, whole.indexOf(' end') + 3), `part of the box copies as ${JSON.stringify(part)}`);
+      // a mouse drag from the first token down to the line after the final newline
+      const pts = await page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        el.scrollIntoView({ block: 'center' });
+        const a = el.querySelector('.tok').getBoundingClientRect();
+        const b = el.getBoundingClientRect();
+        return { x0: a.left + 1, y0: a.top + a.height / 2, x1: b.right - 4, y1: b.bottom - 6 };
+      }, box);
+      await page.mouse.move(pts.x0, pts.y0);
+      await page.mouse.down();
+      await page.mouse.move(pts.x1, pts.y1, { steps: 8 });
+      await page.mouse.up();
+      await page.keyboard.press('Control+C');
+      const dragged = await clipboard(page);
+      assert(dragged === whole, `a drag over the box copies ${JSON.stringify(dragged)} instead of ${JSON.stringify(whole)}`);
+    } finally {
+      await page.evaluate(() => { getSelection().removeAllRanges(); document.getElementById('copy-probe')?.remove(); });
+    }
   }, page);
 
   await check('untrusted text never becomes markup (tokens, Markdown reports)', async () => {
@@ -593,6 +735,30 @@ async function main() {
     assert(/224, 86, 27/.test(res.otherPole) && /51, 105, 138/.test(res.ownPole), `pole colours wrong: own ${res.ownPole}, other ${res.otherPole}`);
     assert(res.md.h === 1 && res.md.strong === 1 && res.md.em === 1 && res.md.li === 3 && res.md.nested === 1 && res.md.td === 2 && res.md.pre === 1 && res.md.quote === 1, `Markdown structure off: ${JSON.stringify(res.md)}`);
     assert(res.md.links.length === 1 && res.md.links[0] === 'https://example.org', `unsafe link rendered: ${res.md.links}`);
+  }, page);
+
+  await check('the report renderer stays fast on hostile Markdown (runs of backticks, blanks, marks without a partner)', async () => {
+    // before the fix: 3,000 backticks took seconds (cubic), a heading with 3,000 blanks longer still
+    const ms = await page.evaluate(async () => {
+      const { renderMarkdown } = await import('/static/js/markdown.js');
+      const cases = {
+        backticks: `x${'`'.repeat(3000)}`,
+        underscores: '__a '.repeat(4000),
+        links: '[a](b'.repeat(3000),
+        heading: `# x${' '.repeat(3000)}y`,
+        fence: `\`\`\` ${' '.repeat(3000)}!`,
+        tableRule: `a | b\n|--${' '.repeat(3000)}x`,
+      };
+      const out = {};
+      for (const [name, src] of Object.entries(cases)) {
+        const t0 = performance.now();
+        renderMarkdown(src);
+        out[name] = Math.round(performance.now() - t0);
+      }
+      return out;
+    });
+    const slow = Object.entries(ms).filter(([, v]) => v > 300);
+    assert(!slow.length, `slow: ${slow.map(([k, v]) => `${k} ${v} ms`).join(', ')}`);
   }, page);
 
   await check('copy as Markdown puts exactly the .md download on the clipboard', async () => {
@@ -643,6 +809,50 @@ async function main() {
     }, page);
   }
 
+  await check('reader groups are marked as measured on this pole, the other pole\'s label explained (circuit tab, overview digest)', async () => {
+    const d = await getJson(page, `/api/v1/poles/${POLE}?include=circuit,overview`);
+    const readers = (d.circuit || {}).readers || [];
+    if (!readers.length) return;
+    const inPanel = (tab, groups) => page.evaluate(async ([tab, groups]) => {
+      const { t } = await import('/static/js/i18n.js');
+      const rows = [...document.querySelectorAll(`#panel-${tab} .cgroup-reader`)];
+      const bad = [];
+      groups.forEach((g, i) => {
+        const row = rows[i];
+        if (!row) return;
+        const label = g.effect === '+' ? 'raised' : g.effect === '-' ? 'lowered' : null;
+        const dir = g.measured_direction || label;
+        const mark = row.querySelector('.effect');
+        const got = !mark ? 'none' : mark.classList.contains('effect-plus') ? 'raised' : 'lowered';
+        if (got !== (dir || 'none')) bad.push(`${g.name}: mark ${got}, measured ${g.measured_direction || '-'}, label ${g.effect}`);
+        if (g.measured_direction && g.measured_direction !== label) {
+          const meta = row.querySelector('.cgroup-meta')?.textContent || '';
+          const measured = t('circuit.measuredHere', { dir: t(`circuit.dir.${g.measured_direction}`) });
+          if (!meta.includes(t('circuit.shownAs', { dir: t(`circuit.dir.${label}`) })) || !meta.includes(measured)) bad.push(`${g.name}: meta "${meta}"`);
+          if (mark && mark.title !== measured) bad.push(`${g.name}: mark title "${mark.title}"`);
+        }
+      });
+      return { bad, rows: rows.length };
+    }, [tab, groups]);
+    await page.locator('#tab-circuit').click();
+    await page.waitForSelector('#panel-circuit[data-ready="1"]', { timeout: 10000 });
+    const circuit = await inPanel('circuit', readers);
+    assert(circuit.rows === readers.length, `${circuit.rows} reader groups shown, the API lists ${readers.length}`);
+    assert(!circuit.bad.length, `circuit tab: ${circuit.bad.slice(0, 3).join('; ')}`);
+    // the digest names the same groups with the explorer's label only; the circuit data measures them
+    const digest = ((d.overview || {}).circuit_digest || {}).readers || [];
+    if (digest.length) {
+      const byName = new Map(readers.map((r) => [r.name, r]));
+      const groups = digest.map((g, i) => ({ ...g, measured_direction: ((readers[i] && readers[i].name === g.name ? readers[i] : byName.get(g.name)) || {}).measured_direction }));
+      await page.locator('#tab-overview').click();
+      await page.waitForSelector('#panel-overview[data-ready="1"]', { timeout: 10000 });
+      const ov = await inPanel('overview', groups);
+      assert(ov.rows === digest.length, `${ov.rows} reader groups in the digest, the API lists ${digest.length}`);
+      assert(!ov.bad.length, `overview digest: ${ov.bad.slice(0, 3).join('; ')}`);
+    }
+    await page.locator('#tab-modes').click();
+  }, page);
+
   await check('landscape draws the mode-similarity heatmap', async () => {
     await page.locator('#tab-landscape').click();
     if (await count(page, '#panel-landscape .ls-table') === 0) return;
@@ -651,6 +861,27 @@ async function main() {
       return cell ? getComputedStyle(cell).backgroundImage : '';
     });
     assert(/gradient/.test(painted), 'heatmap cells are not painted');
+  }, page);
+
+  await check('landscape part in print fits the A4 width (else the whole printout shrinks)', async () => {
+    // this pole, and the downloaded pole with the most modes (the widest table and heatmaps)
+    const res = await getJson(page, '/api/v1/search?has=mirrored&sort=modes&order=desc&limit=100&snippets=false');
+    const widest = (res.hits || []).find((x) => (x.mirrored || []).includes('landscape'));
+    let measured = 0;
+    try {
+      for (const pid of [...new Set([POLE, widest && widest.pid].filter(Boolean))]) {
+        await page.goto(`${BASE}/#/pole/${pid}?tab=landscape`);
+        await page.waitForSelector('#panel-landscape[data-ready="1"]', { timeout: 10000 });
+        if (await count(page, '#panel-landscape .ls-table') === 0) continue;
+        const printed = await printOverflow(page);
+        measured++;
+        assert(printed.scrollW <= printed.W && !printed.past.length, `${pid}: the landscape part is wider than the page (${printed.W} px): ${printed.scrollW} px, ${printed.past.slice(0, 3).join('; ')}`);
+      }
+    } finally {
+      await page.goto(`${BASE}/#/pole/${POLE}`);
+      await page.waitForSelector('#panel-modes[data-ready="1"]', { timeout: 10000 });
+    }
+    if (widest) assert(measured > 0, `no landscape table shown for ${widest.pid}, whose landscape data is downloaded`);
   }, page);
 
   await check('similar poles panel; a mode shows similar modes', async () => {
@@ -738,6 +969,29 @@ async function main() {
     await page.waitForSelector('#panel-modes[data-ready="1"]', { timeout: 10000 });
     await page.waitForSelector('#panel-modes .notice-warn [data-action="fetch-pole"]', { timeout: 5000 });
     assert(await count(page, '#panel-modes .mode') >= 1, 'index-only modes are not listed');
+    // The button follows what POST /api/v1/mirror accepts (settings.can_mirror): this server says so,
+    // and so does one that fetches nothing while pages are viewed (allow_remote_fetch off) but allows downloads.
+    const settings = (await getJson(page, '/api/v1/info')).settings || {};
+    const button = page.locator('#panel-modes [data-action="fetch-pole"]');
+    await page.waitForFunction(() => document.querySelector('#panel-modes [data-action="fetch-pole"]'), null, { timeout: 5000 });
+    const allowed = !(settings.can_mirror === false || settings.offline === true);
+    await page.waitForFunction((on) => document.querySelector('#panel-modes [data-action="fetch-pole"]').disabled === !on, allowed, { timeout: 5000 })
+      .catch(() => { throw new Error(`fetch button ${allowed ? 'disabled' : 'enabled'} although can_mirror is ${settings.can_mirror} and offline ${settings.offline}`); });
+    await page.route('**/api/v1/info', async (route) => {
+      const body = await (await route.fetch()).json();
+      body.settings = { ...body.settings, offline: false, allow_remote_fetch: false, can_fetch: false, can_mirror: true };
+      await route.fulfill({ json: body });
+    });
+    try {
+      await page.reload();
+      await page.waitForSelector('#panel-modes .notice-warn [data-action="fetch-pole"]', { timeout: 10000 });
+      // the server info (it fills the footer) may arrive after the panel
+      await page.waitForFunction(() => document.getElementById('foot-state').textContent.trim() !== '', null, { timeout: 8000 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())));
+      assert(!(await button.isDisabled()), 'with downloads allowed (can_mirror) the fetch button is disabled because page views may not fetch');
+    } finally {
+      await page.unroute('**/api/v1/info');
+    }
   }, page);
 
   // ------------------------------------------------------------------ other views
@@ -753,10 +1007,29 @@ async function main() {
     assert(!/verdict|grouping|propose_assign|act_max/i.test(head), `raw field names in the header: ${head}`);
     // the coloured mark of an input group is its role for that pole (drives / opposes), not the net sign of its lanes
     const marks = await page.evaluate(() => [...document.querySelectorAll('.neuron-circuit > .circuit')].map((c) => [...c.querySelectorAll('.cgroup-input')].map((g) => g.querySelector('.effect')?.className || '')));
+    const norm = (cls) => (cls.includes('effect-plus') ? 'effect-plus' : cls.includes('effect-minus') ? 'effect-minus' : '');
     circuits.forEach((c, i) => {
       const want = (c.inputs || []).map((g) => (g.role === 'drives' ? 'effect-plus' : g.role === 'opposes' ? 'effect-minus' : ''));
-      const got = (marks[i] || []).map((cls) => (cls.includes('effect-plus') ? 'effect-plus' : cls.includes('effect-minus') ? 'effect-minus' : ''));
+      const got = (marks[i] || []).map(norm);
       assert(JSON.stringify(got) === JSON.stringify(want), `circuit ${i + 1}: input marks ${got.join(' ')} do not follow the roles ${want.join(' ')}`);
+    });
+    // a reader group's mark is what this pole does to it: measured where the API measured it, never the other pole's label
+    const readerMarks = await page.evaluate(() => [...document.querySelectorAll('.neuron-circuit > .circuit')].map((c) => [...c.querySelectorAll('.cgroup-reader')].map((g) => g.querySelector('.effect')?.className || '')));
+    circuits.forEach((c, i) => {
+      const want = (c.readers || []).map((g) => {
+        const dir = g.measured_direction || (g.effect === '+' ? 'raised' : g.effect === '-' ? 'lowered' : '');
+        return dir === 'raised' ? 'effect-plus' : dir === 'lowered' ? 'effect-minus' : '';
+      });
+      const got = (readerMarks[i] || []).map(norm);
+      assert(JSON.stringify(got) === JSON.stringify(want), `circuit ${i + 1}: reader marks ${got.join(' ')} differ from the measured directions ${want.join(' ')}`);
+    });
+    // the output tokens listed are the ones this pole raises: their push on this pole shows as "+" on both poles
+    const pushes = await page.evaluate(() => [...document.querySelectorAll('.neuron-circuit > .circuit')].map((c) => [...c.querySelectorAll('.out-tokens .out-push')].map((s) => s.textContent)));
+    circuits.forEach((c, i) => {
+      const n = (c.output_tokens || []).filter((x) => typeof x.weight === 'number').length;
+      assert((pushes[i] || []).length === n, `circuit ${i + 1}: ${(pushes[i] || []).length} output tokens with a number, the API has ${n}`);
+      const lowered = (pushes[i] || []).filter((s) => s.startsWith('−'));
+      assert(!lowered.length, `circuit ${i + 1}: output tokens shown as lowered by the pole that raises them: ${lowered.slice(0, 3).join(' ')}`);
     });
     await page.waitForSelector('.graph-body :is(svg.graph, .notice)', { timeout: 10000 });
     assert(await count(page, '.graph-body .notice-error') === 0, 'graph shows an error');
@@ -791,6 +1064,47 @@ async function main() {
     await page.waitForSelector('.batch-tools .btn.is-done', { timeout: 5000 });
     const text = await clipboard(page);
     assert(text.includes(`## ${QUERY}`) && text.includes('|'), 'clipboard does not hold the Markdown table');
+  }, page);
+
+  await check('batch: the copied Markdown keeps atlas text as text (one cell each, no live tags)', async () => {
+    // labels and snippets as hostile as atlas text can be (a real label reads 'Repeated <td> sibling tags')
+    const EVIL = 'x | <td> <img src=x onerror=alert(1)> *b* _i_ `c` [l](u) &amp; ~~s~~ $m$ #h \\';
+    await page.route('**/api/v1/search/batch', async (route) => {
+      const body = await (await route.fetch()).json();
+      for (const r of body.results || []) {
+        // (first in the matched text: the table cuts that to 240 characters)
+        for (const m of r.modes || []) m.label = `${m.label} ${EVIL}`;
+        for (const hit of r.hits || []) {
+          for (const m of hit.matches || []) m.text = `${EVIL} ${m.text}`;
+          for (const k of ['headline', 'description']) if (hit[k]) hit[k] = `${EVIL} ${hit[k]}`;
+        }
+        r.notes = [...(r.notes || []), `- ${EVIL}\n1. second line`];
+      }
+      await route.fulfill({ json: body });
+    });
+    try {
+      for (const group of ['mode', 'pole']) {
+        await page.goto(`${BASE}/#/batch`);
+        await page.locator('.batch-area').fill(QUERY);
+        await page.locator(`[data-name="bgroup"][data-value="${group}"]`).click();
+        await page.locator('[data-action="run-batch"]').click();
+        await page.waitForSelector('.batch-tools .btn', { timeout: 10000 });
+        await page.locator('.batch-tools .btn').click();
+        await page.waitForSelector('.batch-tools .btn.is-done', { timeout: 5000 });
+        const md = await clipboard(page);
+        const rows = md.split('\n').filter((l) => l.startsWith('|'));
+        assert(rows.length > 2, `${group}: no table rows copied`);
+        const cells = (line) => line.split(/(?<!\\)\|/).length;
+        const odd = rows.filter((l) => cells(l) !== cells(rows[0]));
+        assert(!odd.length, `${group}: rows with a different number of cells than the header: ${JSON.stringify(odd[0])}`);
+        assert(!/<(td|img)/.test(md) && md.includes('&lt;img') && md.includes('&lt;td>'), `${group}: tags are not escaped`);
+        for (const piece of ['\\*b\\*', '\\_i\\_', '\\`c\\`', '\\[l\\](u)', '&amp;amp;', '\\~\\~s\\~\\~', '\\$m\\$', '\\#h', 'x \\| &lt;td>']) assert(md.includes(piece), `${group}: ${JSON.stringify(piece)} is not in the copied Markdown`);
+        assert(/^> \\- x \\\| /m.test(md) && !/^1\. second/m.test(md), `${group}: a note starts a list or leaves the quote: ${JSON.stringify(md.split('\n').filter((l) => l.startsWith('>')).slice(-2))}`);
+      }
+    } finally {
+      await page.unroute('**/api/v1/search/batch');
+      await page.evaluate(() => sessionStorage.removeItem('na.batch')).catch(() => {});
+    }
   }, page);
 
   await check('about: unofficial notice, link to the original, glossary, server state', async () => {
@@ -852,10 +1166,11 @@ async function main() {
     let progress = 0;
     let cancelled = false;
     const job = () => ({ id: 'job1', label: 'search', state: cancelled ? 'cancelled' : progress >= 1 ? 'done' : 'running', poles: 3, sources: ['subcircuit'], files_to_fetch: 10, files_done: Math.round(progress * 10), progress, report: { requested: 10, fetched: Math.round(progress * 10), skipped: 0, absent: 0, failed: 0, bytes_fetched: 1000, seconds: 1, errors: [], cancelled }, created_at: Date.now() / 1000, finished_at: null, error: '' });
+    // a server that fetches nothing while pages are viewed, but accepts downloads (can_mirror): the dialog offers them
     await page.route('**/api/v1/info', async (route) => {
       const res = await route.fetch();
       const body = await res.json();
-      body.settings = { ...body.settings, offline: false, allow_remote_fetch: true };
+      body.settings = { ...body.settings, offline: false, allow_remote_fetch: false, can_fetch: false, can_mirror: true };
       await route.fulfill({ json: body });
     });
     await page.route(/\/api\/v1\/mirror(\?.*)?$/, (route) => {
@@ -869,28 +1184,37 @@ async function main() {
         route.fulfill({ json: { cancelled: 'job1' } });
       } else route.fulfill({ json: job() });
     });
-    await page.goto(`${BASE}/#/search?q=${Q}`);
-    await page.reload();
-    await page.waitForSelector('.hit-pole');
-    await page.locator('[data-action="region"]').click();
-    await page.waitForSelector('.region-dialog .plan .stat-value');
-    const start = page.locator('.region-dialog .dialog-actions .btn-primary');
-    if (await start.isDisabled()) {
-      // nothing left to fetch for this query on this server: the button is rightly disabled
-      await page.keyboard.press('Escape');
-    } else {
-      await start.click();
-      await page.waitForSelector('.region-dialog .job .progress', { timeout: 8000 });
-      assert(/10/.test(await page.locator('.region-dialog .job .progress').first().getAttribute('aria-valuenow')), 'progress bar does not show 10 %');
-      assert(!(await page.locator('#region-badge').isHidden()), 'no running-job badge in the header');
-      await page.locator('.region-dialog .job .btn-danger').click();
-      await page.waitForSelector('.region-dialog .job.job-cancelled', { timeout: 8000 });
-      await page.keyboard.press('Escape');
+    try {
+      await page.goto(`${BASE}/#/search?q=${Q}`);
+      await page.reload();
+      await page.waitForSelector('.hit-pole');
+      const planned = page.waitForResponse((r) => r.url().includes('/api/v1/mirror/plan'), { timeout: 8000 });
+      await page.locator('[data-action="region"]').click();
+      const plan = await (await planned).json();
+      await page.waitForSelector('.region-dialog .plan .stat-value');
+      const start = page.locator('.region-dialog .dialog-actions .btn-primary');
+      const offlineTitle = await page.evaluate(async () => (await import('/static/js/i18n.js')).t('region.offlineTitle'));
+      assert(!(await page.locator('.region-dialog').innerText()).includes(offlineTitle), 'the dialog says this server does not download, although it accepts downloads (can_mirror)');
+      if ((plan.estimate || {}).files_to_fetch > 0) assert(!(await start.isDisabled()), 'the dialog does not offer the download, although the server accepts it (can_mirror)');
+      if (await start.isDisabled()) {
+        // nothing left to fetch for this query on this server: the button is rightly disabled
+        await page.keyboard.press('Escape');
+      } else {
+        await start.click();
+        await page.waitForSelector('.region-dialog .job .progress', { timeout: 8000 });
+        assert(/10/.test(await page.locator('.region-dialog .job .progress').first().getAttribute('aria-valuenow')), 'progress bar does not show 10 %');
+        assert(!(await page.locator('#region-badge').isHidden()), 'no running-job badge in the header');
+        await page.locator('.region-dialog .job .btn-danger').click();
+        await page.waitForSelector('.region-dialog .job.job-cancelled', { timeout: 8000 });
+        await page.keyboard.press('Escape');
+      }
+    } finally {
+      if (await count(page, 'dialog[open]')) await page.keyboard.press('Escape');
+      await page.unroute('**/api/v1/info');
+      await page.unroute(/\/api\/v1\/mirror(\?.*)?$/);
+      await page.unroute(/\/api\/v1\/mirror\/jobs(\?.*)?$/);
+      await page.unroute(/\/api\/v1\/mirror\/jobs\/job1/);
     }
-    await page.unroute('**/api/v1/info');
-    await page.unroute(/\/api\/v1\/mirror(\?.*)?$/);
-    await page.unroute(/\/api\/v1\/mirror\/jobs(\?.*)?$/);
-    await page.unroute(/\/api\/v1\/mirror\/jobs\/job1/);
   }, page);
 
   await check('map: points, cluster legend, highlight box, click opens the pole; the URL sets the options', async () => {

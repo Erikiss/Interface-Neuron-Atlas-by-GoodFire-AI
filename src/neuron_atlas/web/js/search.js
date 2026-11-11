@@ -162,8 +162,10 @@ export function mount(container, ctx) {
   const notes = h('div', { class: 'results-notes' });
   const list = h('div', { class: 'hits', role: 'list' });
   const foot = h('div', { class: 'results-foot' });
+  // on paper the search box and the sort controls are gone: this line says what the list is for
+  const printQuery = h('p', { class: 'print-only print-query' });
   const resultsBox = h('section', { class: 'results', 'aria-label': t('search.results') },
-    h('div', { class: 'results-head' }, summary, sortBox, tools), chips, notes, list, foot);
+    printQuery, h('div', { class: 'results-head' }, summary, sortBox, tools), chips, notes, list, foot);
 
   const root = h('div', { class: 'search-view' }, searchbar, options, h('div', { class: 'search-layout' }, filterBox, resultsBox));
   container.appendChild(root);
@@ -325,8 +327,19 @@ export function mount(container, ctx) {
 
   function digest(res) {
     const items = res.group_by === 'neuron' ? res.neurons : res.group_by === 'mode' ? res.modes : res.hits;
-    const byPole = res.group_by !== 'neuron' && res.group_by !== 'mode';
-    return { items: [...(items || [])], total: res.total, poleTotal: byPole ? res.total : null, next: res.next_offset, took: res.took_ms, notes: res.notes || [], groupBy: res.group_by, understood: res.query || {} };
+    return { items: [...(items || [])], total: res.total, poleTotal: poleCount(res), next: res.next_offset, took: res.took_ms, notes: res.notes || [], groupBy: res.group_by, understood: res.query || {} };
+  }
+
+  /**
+   * How many poles a search answer stands for (null when it does not say): its total when it lists poles,
+   * else the sum of its pole facet, which counts poles in every grouping, also one typed into the query
+   * (group:mode).  The export streams exactly these poles.
+   */
+  function poleCount(res) {
+    if (res.group_by !== 'neuron' && res.group_by !== 'mode') return res.total ?? null;
+    const counts = res.facets && res.facets.pole;
+    if (!counts || typeof counts !== 'object') return null;
+    return Object.values(counts).reduce((sum, n) => sum + (Number(n) || 0), 0);
   }
 
   async function loadMore() {
@@ -365,12 +378,18 @@ export function mount(container, ctx) {
         m.mode_index != null ? ` ${m.mode_index}` : '', m.ref ? ` ${m.ref}` : '',
         m.share != null ? h('span', { class: 'match-share' }, ` · ${fmtPct(m.share)}`) : null),
       h('span', { class: 'match-text' }, highlight(m.text)));
-    const ul = h('ul', { class: 'matches' }, ms.slice(0, 3).map(row));
+    // Every match is built: the ones past the third wait behind "+N more" on screen, but print shows them all.
+    const ul = h('ul', { class: 'matches' }, ms.map((m, i) => {
+      const li = row(m);
+      if (i >= 3) li.classList.add('match-extra');
+      return li;
+    }));
     if (ms.length > 3) {
+      ul.classList.add('is-collapsed');
       const btn = h('button', { type: 'button', class: 'linkish' }, t('showMore', { n: ms.length - 3 }));
       btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        ms.slice(3).forEach((m) => ul.insertBefore(row(m), btn.parentNode));
+        ul.classList.remove('is-collapsed');
         btn.parentNode.remove();
       });
       ul.appendChild(h('li', { class: 'match match-more' }, btn));
@@ -470,14 +489,17 @@ export function mount(container, ctx) {
     }, { cls: 'popover-menu', align: 'end' });
   }
 
-  /** Grouped by mode or neuron, the total counts modes / neurons: ask for the number of poles. */
+  /** An answer without a pole facet (grouped by mode or neuron): ask for the number of poles. */
   async function countPoles(signal) {
     if (!data || data.poleTotal != null) return;
     const mine = data;
     try {
-      const res = await api('/api/v1/search', { params: { ...filterParams(state), limit: 0, snippets: false }, signal });
+      // the query text may group by itself (group:mode): the pole facet counts poles all the same
+      const res = await api('/api/v1/search', { params: { ...filterParams(state), limit: 0, snippets: false, facets: true }, signal });
       if (destroyed || data !== mine) return;
-      mine.poleTotal = res.total;
+      const n = poleCount(res);
+      if (n == null) return;
+      mine.poleTotal = n;
       paintExport();
     } catch {
       /* the button keeps its plain label */
@@ -491,8 +513,16 @@ export function mount(container, ctx) {
     exportBtn.disabled = data.total === 0 || data.poleTotal === 0;
   }
 
+  function paintPrintQuery() {
+    const parts = [];
+    if (state.q.trim()) parts.push(t('print.query', { q: state.q.trim() }));
+    if (state.sort !== 'relevance' || state.order) parts.push(`${t('search.sort')}: ${t(`sort.${state.sort}`, null, state.sort)}${state.order ? `, ${t(`order.${state.order}`, null, state.order)}` : ''}`);
+    printQuery.textContent = parts.join(' · ');
+  }
+
   function renderResults() {
     if (!data) return;
+    paintPrintQuery();
     const total = data.total;
     replace(summary,
       h('strong', { class: 'total' }, fmtInt(total)), ' ', unitWord(data.groupBy, total),

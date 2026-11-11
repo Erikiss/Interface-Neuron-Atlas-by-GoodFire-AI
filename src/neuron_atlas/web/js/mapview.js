@@ -558,6 +558,8 @@ export function mount(container, ctx) {
   function renderChips() {
     const items = filterChips(state).map((c) => h('span', { class: 'chip chip-static' }, c.label));
     replace(chipsBox,
+      // on paper the query field is gone: the search text is printed with the filters
+      state.q.trim() ? h('span', { class: 'print-only print-query' }, t('print.query', { q: state.q.trim() })) : null,
       items,
       h('a', { class: 'linkish', href: buildHash('search', '', stateToParams(state)) }, hasFilters(state) ? t('map.editFilters') : t('map.addFilters')));
   }
