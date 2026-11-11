@@ -1,0 +1,9 @@
+.git
+.venv
+data
+atlas-data
+out
+**/__pycache__
+.pytest_cache
+.ruff_cache
+tests

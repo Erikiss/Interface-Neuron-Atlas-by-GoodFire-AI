@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local atlas mirror / caches / analysis output.
+# Goodfire's atlas data is NOT redistributed through this repository.
+/data/
+/atlas-data/
+/out/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+.env
