@@ -72,6 +72,10 @@ notebook.restore("/content/drive/MyDrive/neuron-atlas/neuron-atlas-<version>.tar
   bedienen; das Notebook nutzt die Oberfläche deshalb als Ansicht neben den Python-Zellen.
 - Eine neuere Fassung in einer laufenden Sitzung: die Installationszeile mit
   `--force-reinstall --no-deps` ausführen, dann die Sitzung neu starten.
+- Ist das Repository privat, braucht Colab einen GitHub-Token mit Lesezugriff als Colab-Secret
+  `GITHUB_TOKEN`; die Installationszelle reicht ihn nur als HTTP-Header an git weiter. Den
+  „In Colab öffnen“-Link öffnet Colab dann nach einer einmaligen GitHub-Freigabe („private
+  Repositories einbeziehen“). Bei einem öffentlichen Repository ist beides nicht nötig.
 
 ## Begriffe in Kürze
 
