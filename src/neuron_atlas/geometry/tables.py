@@ -270,12 +270,12 @@ def subcircuit_link_rows(pid: str, sub: dict[str, Any]) -> Iterator[Row]:
     """One row per (subcircuit, table, other neuron).
 
     ``direction`` is ``in`` for neurons that feed this pole and ``out`` for
-    neurons that read it.  ``weight`` is the unit's mean contribution over the
-    subcircuit's firings: a positive magnitude for drivers and opposers (the
+    neurons that read it.  ``weight`` is the average contribution of the unit
+    across the subcircuit's firings: a positive magnitude for drivers and opposers (the
     role says which way it pushes: drivers push the lane towards the pole's
     firing direction - the gate open, the up signal towards the pole's sign),
     signed for readers (the push on the reader's own activation).  ``rest`` is
-    its mean over the pole's other firings.
+    the same average across all remaining firings of the pole.
     """
     did = pid.rsplit("__", 1)[0]
     mode_of = _mode_of(sub)

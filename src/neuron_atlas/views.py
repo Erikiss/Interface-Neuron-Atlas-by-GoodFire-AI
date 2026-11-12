@@ -193,8 +193,8 @@ def mode_numbers(raw: dict[str, Any]) -> list[dict[str, Any]]:
     """Per-mode numbers exactly as the Overview computes them from the five rarity levels.
 
     For each mode (unassigned bucket included, as the last entry): ``firing_share``
-    and ``damage_share`` weighted to how often firings occur in real text,
-    ``damage_per_firing`` relative to the pole's average firing, and
+    and ``damage_share`` weighted by the natural frequency of each rarity level,
+    ``damage_per_firing`` as a ratio to the pole's mean damage per firing, and
     ``tested_firings`` (firings whose damage was measured rather than estimated).
     """
     modes = raw.get("modes") or []
@@ -348,9 +348,8 @@ CIRCUIT_MEMBERS = 12
 def circuit_view(meta: dict[str, Any], pole: str, catalog: Any = None, *, members: int = CIRCUIT_MEMBERS) -> dict[str, Any]:
     """The circuit of one pole: earlier neurons that feed it, later neurons that read it.
 
-    The neuron computes ``gate × up``: "the gate decides whether the neuron
-    switches on; the up signal sets how strongly, and with which sign, it
-    fires once the gate is open".  ``inputs`` are groups of earlier neurons
+    The neuron computes ``gate × up`` (the gate opens or closes it, ``up``
+    carries magnitude and sign).  ``inputs`` are groups of earlier neurons
     with their summed signed contribution to the ``gate`` and ``up`` signals
     (positive raises the signal; the two are never added) and their ``role``
     for this pole (``drives`` / ``opposes``).  ``readers`` are groups of later
