@@ -13,12 +13,10 @@ Terminology used by the atlas (and kept here):
 ``mode``
     One distinct thing a pole fires on; a group of subcircuits with one meaning.
 ``category``
-    ``mono`` single mode · ``fn`` one dominant mode (the main mode accounts for
-    at least 90 % of the damage when the neuron is switched off) · ``poly``
-    multiple modes · ``dark`` uninterpretable · ``none`` not yet read.
+    ``mono`` · ``fn`` · ``poly`` · ``dark`` · ``none`` (see ``CATEGORY_WORDS``
+    and ``CATEGORY_HELP`` below).
 ``simulatability``
-    Share of the neuron's effect on the model's predictions (KL) that a
-    simulator recovers from the pole's description on held-out text.
+    Simulation score of a pole's description, a fraction (see the glossary).
 """
 
 from __future__ import annotations

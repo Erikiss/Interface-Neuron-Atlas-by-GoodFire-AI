@@ -551,7 +551,7 @@ class Details:
     def _mode_examples(
         self, raw_subs: dict[str, Any], sids: list[str], limit: int, with_tokens: bool
     ) -> list[Example]:
-        """Strongest examples of a mode, taken in turn from its subcircuits (largest first)."""
+        """Strongest examples of a mode: round-robin over its subcircuits, biggest share first."""
         ordered = sorted(
             (sid for sid in sids if sid in raw_subs), key=lambda sid: -(_num(raw_subs[sid].get("share")) or 0.0)
         )
