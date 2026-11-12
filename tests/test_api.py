@@ -307,3 +307,21 @@ def test_the_markdown_export_keeps_the_query_inside_its_code_span(client):
     markdown_it = pytest.importorskip("markdown_it")
     html = markdown_it.MarkdownIt("commonmark").render(md)
     assert "<img" not in html
+
+
+def test_a_cross_site_simple_post_cannot_start_anything(client):
+    """Browsers send cross-site POSTs without a CORS preflight only as text/plain or form data; those must fail.
+
+    (A JSON body needs a preflight, which this server does not grant to foreign origins.)
+    """
+    body = '{"selection": {"ids": ["L4_E1_N10"]}}'
+    for ctype in ("text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x"):
+        r = client.post("/api/v1/mirror", content=body, headers={"Content-Type": ctype, "Origin": "https://evil.example"})
+        assert r.status_code == 422, (ctype, r.status_code)
+    assert client.get("/api/v1/mirror/jobs").json()["jobs"] == []
+    pre = client.options(
+        "/api/v1/mirror",
+        headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST",
+                 "Access-Control-Request-Headers": "content-type"},
+    )  # fmt: skip
+    assert "access-control-allow-origin" not in pre.headers

@@ -12,16 +12,16 @@ from . import fakeatlas
 @pytest.fixture
 def fake_colab(monkeypatch):
     """A stand-in for Colab's front-end helpers (the real ones need a browser attached to the kernel)."""
-    calls = {"windows": [], "js": []}
+    calls = {"iframes": [], "js": []}
 
-    def eval_js(code):
-        calls["js"].append(code)
+    def eval_js(code, ignore_result=False, timeout_sec=None):
+        calls["js"].append((code, timeout_sec))
         return "https://8000-m-s-abc123.us-west4-0.prod.colab.dev/"
 
-    def serve_kernel_port_as_window(port, path="/", anchor_text=None):
-        calls["windows"].append((port, anchor_text))
+    def serve_kernel_port_as_iframe(port, path="/", width="100%", height="400", cache_in_notebook=False):
+        calls["iframes"].append((port, height, cache_in_notebook))
 
-    output = types.SimpleNamespace(eval_js=eval_js, serve_kernel_port_as_window=serve_kernel_port_as_window)
+    output = types.SimpleNamespace(eval_js=eval_js, serve_kernel_port_as_iframe=serve_kernel_port_as_iframe)
     colab = types.ModuleType("google.colab")
     colab.output = output
     google = types.ModuleType("google")
@@ -48,6 +48,7 @@ def test_the_server_runs_in_the_background_of_a_notebook(atlas):
 
 
 def test_starting_again_replaces_the_first_server(atlas):
+    assert notebook._free_port(8080, "127.0.0.1") != 8080  # Colab's own services live there
     first = notebook.start(atlas, port=18741, show=False)
     second = notebook.start(atlas, port=18741, show=False)
     try:
@@ -57,15 +58,20 @@ def test_starting_again_replaces_the_first_server(atlas):
     assert not second.running
 
 
-def test_in_colab_the_proxy_link_is_shown_and_its_host_names_are_accepted(atlas, fake_colab):
+def test_in_colab_the_page_is_shown_inline_and_internal_host_names_are_accepted(atlas, fake_colab):
+    pytest.importorskip("IPython")
     assert notebook.in_colab()
     server = notebook.start(atlas, port=18751)
     try:
         assert server.url == "https://8000-m-s-abc123.us-west4-0.prod.colab.dev/"
-        assert fake_colab["windows"] == [(server.port, "Neuron Atlas Interface öffnen")]
+        assert fake_colab["iframes"] == [(server.port, "900", False)]  # never cached into the notebook
+        assert all(timeout for _code, timeout in fake_colab["js"])  # eval_js never waits for ever
         with httpx.Client(base_url=f"http://127.0.0.1:{server.port}", timeout=10) as c:
-            proxied = c.get("/api/v1/info", headers={"Host": "8000-m-s-abc123.us-west4-0.prod.colab.dev"})
-            assert proxied.status_code == 200
+            # Colab's proxy passes an internal Google host name on, not the public one.
+            internal = c.get("/api/v1/info", headers={"Host": "abc123.us-west4.c.colab-user-runtimes.internal:8000"})
+            assert internal.status_code == 200
+            assert internal.headers["x-colab-notebook-cache-control"] == "no-cache"
+            assert "https://8000-m-s-abc123.us-west4-0.prod.colab.dev/api/v1/search" in c.get("/llms.txt").text
     finally:
         server.stop()
 

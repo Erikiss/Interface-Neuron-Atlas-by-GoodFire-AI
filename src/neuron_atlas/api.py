@@ -239,7 +239,10 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
 
     @app.get("/llms.txt", include_in_schema=False, response_class=PlainTextResponse)
     def llms(request: Request) -> str:
-        return llms_txt(str(request.base_url).rstrip("/"))
+        # Behind a proxy that does not pass the public host on (Colab), the request only knows an internal
+        # name; whoever starts the server can set the public address (see neuron_atlas.notebook).
+        public = getattr(request.app.state, "public_url", None)
+        return llms_txt(str(public or request.base_url).rstrip("/"))
 
     # ------------------------------------------------------------------ search
 
@@ -537,7 +540,12 @@ def create_app(atlas: Atlas | None = None, settings: Settings | None = None, *, 
             "csv": "text/csv; charset=utf-8",
             "md": "text/markdown; charset=utf-8",
         }[fmt]
-        headers = {"Content-Disposition": f'attachment; filename="neuron-atlas-export.{fmt}"'}
+        headers = {
+            "Content-Disposition": f'attachment; filename="neuron-atlas-export.{fmt}"',
+            # A stream: proxies should pass it on as it comes instead of collecting it first.
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        }
         return StreamingResponse(lines(), media_type=media, headers=headers)
 
     @app.get(

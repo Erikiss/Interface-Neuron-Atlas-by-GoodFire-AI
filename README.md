@@ -44,6 +44,35 @@ Mit Docker:
 docker compose up -d             # http://localhost:8000, Daten im Volume "atlas-data"
 ```
 
+### In Google Colab
+
+[![In Colab öffnen](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Erikiss/Interface-Neuron-Atlas-by-GoodFire-AI/blob/claude%2Fneuronatlas-interface-api-h1uw92/notebooks/colab.ipynb)
+
+Ohne lokale Installation: Das Notebook [`notebooks/colab.ipynb`](notebooks/colab.ipynb) installiert das
+Paket, sucht und liest aus Python heraus, lädt eine semantische Region, zeigt Karten und Tabellen –
+und auf Wunsch die Oberfläche selbst, eingebettet unter der Zelle. In jedem Notebook geht dasselbe so:
+
+```python
+from neuron_atlas import notebook
+
+atlas = notebook.open_atlas()                        # Atlas der Sitzung (Spiegel unter /content/neuron-atlas)
+notebook.show_pole("L30_E47_N449__pos")              # ein Pol als Dokument
+server = notebook.start(atlas)                       # Oberfläche, API und MCP im Hintergrund, eingebettet
+notebook.backup("/content/drive/MyDrive/neuron-atlas")   # Spiegel als eine Datei nach Drive …
+notebook.restore("/content/drive/MyDrive/neuron-atlas/neuron-atlas-<version>.tar")   # … und zurück
+```
+
+- Die eingebettete Oberfläche (Colabs Port-Proxy) ist nur für dich erreichbar, in diesem Browser und
+  solange das Notebook offen ist; ihre Adresse ändert sich mit jeder Laufzeit. Der MCP-Endpunkt ist
+  darüber nicht für Chatbots im Netz erreichbar – dafür lokal installieren.
+- Colab-Sitzungen sind vorübergehend. Der Spiegel liegt auf der Platte der Sitzung; `backup()`
+  sichert ihn als **eine** Archivdatei nach Google Drive (SQLite und tausende kleine Dateien direkt auf
+  Drive sind langsam und unzuverlässig), `restore()` holt ihn in der nächsten Sitzung zurück.
+- Auf kostenlosen Laufzeiten untersagt Colab, das Notebook hauptsächlich über eine Web-Oberfläche zu
+  bedienen; das Notebook nutzt die Oberfläche deshalb als Ansicht neben den Python-Zellen.
+- Eine neuere Fassung in einer laufenden Sitzung: die Installationszeile mit
+  `--force-reinstall --no-deps` ausführen, dann die Sitzung neu starten.
+
 ## Begriffe in Kürze
 
 - **Neuron**: `L30_E47_N449` = Layer 30 / Expert 47 / Neuron 449 (angezeigt als `L30/E47/N449`).
@@ -328,9 +357,11 @@ src/neuron_atlas/
   mirror.py     Download-Pläne und Hintergrund-Jobs
   service.py    die eine Fassade, auf der API, MCP und CLI aufsetzen
   api.py        FastAPI-Anwendung · mcp_server.py MCP-Werkzeuge · cli.py Kommandozeile
+  notebook.py   Oberfläche und Ansichten in Jupyter/Colab, Spiegel sichern und zurückholen
   geometry/     tables.py · maps.py · graph.py
   web/          statische Oberfläche (kein Build-Schritt)
 docs/           Datenquellen des Atlas (rekonstruiert), Geometrie-Leitfaden
+notebooks/      colab.ipynb: alles in Google Colab
 tests/          Tests mit synthetischen Daten (kein Netz nötig)
 ```
 

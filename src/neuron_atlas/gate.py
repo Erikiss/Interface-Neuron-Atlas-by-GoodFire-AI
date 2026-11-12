@@ -40,8 +40,13 @@ LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 PROTECTED = ("/api/", "/mcp", "/p/")
 #: Largest request body accepted (batch requests included).
 MAX_BODY_BYTES = 2 * 1024 * 1024
-#: Sent with every response: no URL (which may carry ?api_key=) leaks to other sites; no type sniffing.
-SECURITY_HEADERS = ((b"referrer-policy", b"no-referrer"), (b"x-content-type-options", b"nosniff"))
+#: Sent with every response: no URL (which may carry ?api_key=) leaks to other sites; no type sniffing;
+#: and Colab's older port proxy must not store answers inside the notebook file.
+SECURITY_HEADERS = (
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-colab-notebook-cache-control", b"no-cache"),
+)
 
 
 class ClientLimiter:
