@@ -46,7 +46,7 @@ docker compose up -d             # http://localhost:8000, Daten im Volume "atlas
 
 ### In Google Colab
 
-[![In Colab öffnen](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Erikiss/Interface-Neuron-Atlas-by-GoodFire-AI/blob/claude%2Fneuronatlas-interface-api-h1uw92/notebooks/colab.ipynb)
+[![In Colab öffnen](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Erikiss/Interface-Neuron-Atlas-by-GoodFire-AI/blob/main/notebooks/colab.ipynb)
 
 Ohne lokale Installation: Das Notebook [`notebooks/colab.ipynb`](notebooks/colab.ipynb) installiert das
 Paket, sucht und liest aus Python heraus, lädt eine semantische Region, zeigt Karten und Tabellen –
