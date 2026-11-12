@@ -258,10 +258,16 @@ def build_server(atlas: Atlas) -> MCPServer:
     """Create the MCP server for an :class:`Atlas`."""
     from . import __version__
 
-    try:
-        server = MCPServer("neuron-atlas", instructions=INSTRUCTIONS, version=__version__)
-    except TypeError:  # SDK 1.x has no version argument
-        server = MCPServer("neuron-atlas", instructions=INSTRUCTIONS)
+    # The SDK sets up logging for the whole process (logging.basicConfig) at the level given here; at its
+    # default INFO every HTTP request of every library is printed (server console, notebooks).
+    server = None
+    for extra in ({"version": __version__, "log_level": "WARNING"}, {"log_level": "WARNING"}, {}):
+        try:
+            server = MCPServer("neuron-atlas", instructions=INSTRUCTIONS, **extra)
+            break
+        except (TypeError, ValueError):  # older SDKs lack one of the arguments
+            continue
+    assert server is not None
     settings = atlas.settings
 
     async def run(fn: Any, *args: Any) -> Any:

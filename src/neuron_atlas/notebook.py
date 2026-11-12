@@ -132,8 +132,9 @@ def start(
 
     import logging
 
-    # The MCP library announces its session manager at INFO level; in a notebook that is only noise.
-    logging.getLogger("mcp").setLevel(logging.WARNING)
+    # Library chatter at INFO level (the MCP session manager, every HTTP request) is only noise in a notebook.
+    for name in ("mcp", "httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     host = "127.0.0.1"
     port = _free_port(port, host)
     app = create_app(atlas)
