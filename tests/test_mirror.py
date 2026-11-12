@@ -1,0 +1,180 @@
+import time
+
+import pytest
+
+from neuron_atlas.mirror import MirrorJobs, files_of_pole, make_plan, mirrored_sources, run_plan
+from neuron_atlas.models import MirrorRequest, SearchQuery, Selection
+
+from . import fakeatlas
+
+
+def test_a_plan_lists_exactly_the_files_that_exist(atlas):
+    cat = atlas.catalog
+    assert set(files_of_pole(cat.pole(fakeatlas.RIVER))) == {
+        "subcircuit", "overview", "landscape", "islands", "circuit_meta", "circuit_exemplars", "circuit_incidence",
+    }  # fmt: skip
+    assert set(files_of_pole(cat.pole(fakeatlas.DARK))) == {"islands"}
+    assert set(files_of_pole(cat.pole(fakeatlas.FAILED_READ))) == {"subcircuit", "islands"}
+    assert set(files_of_pole(cat.pole(fakeatlas.RIVER), ["landscape"])) == {"landscape"}
+
+    plan = make_plan(cat, atlas.source, [fakeatlas.RIVER, fakeatlas.MIXED, "L77_E1_N1__pos"])
+    assert plan.poles == [fakeatlas.RIVER, fakeatlas.MIXED] and plan.neurons == ["L4_E1_N10"]
+    est = plan.estimate()
+    # 7 index files (already fetched to build the catalog) + 2 x 4 pole files + 3 shared circuit files.
+    assert est["files_total"] == 18 and est["files_present"] == 7 and est["files_to_fetch"] == 11
+    assert est["to_fetch_by_kind"]["circuit_meta"] == 1 and est["estimated_download_bytes"] > 0
+    with pytest.raises(ValueError):
+        make_plan(cat, atlas.source, [fakeatlas.RIVER], ["everything"])
+
+
+def test_running_a_plan_is_resumable_and_never_refetches(atlas, upstream):
+    plan = make_plan(atlas.catalog, atlas.source, [fakeatlas.RIVER, fakeatlas.FAILED_READ])
+    report = run_plan(plan, atlas.source)
+    # The failed read is listed in the subcircuit index, but upstream has no file for it.
+    assert report.fetched == 8 and report.absent == 1 and report.failed == 0
+    before = len(upstream.requests)
+    again = make_plan(atlas.catalog, atlas.source, [fakeatlas.RIVER, fakeatlas.FAILED_READ])
+    assert again.missing == [] and again.absent == 1
+    assert run_plan(again, atlas.source).fetched == 0 and len(upstream.requests) == before
+    have = mirrored_sources(atlas.catalog, atlas.source, [fakeatlas.RIVER, fakeatlas.MIXED, fakeatlas.FAILED_READ])
+    assert have[fakeatlas.RIVER] == ["subcircuit", "overview", "landscape", "islands", "circuit"]
+    assert have[fakeatlas.MIXED] == ["circuit"]  # circuit files belong to the neuron
+    assert have[fakeatlas.FAILED_READ] == ["islands"]
+
+
+def test_a_plan_can_be_cancelled(atlas):
+    plan = make_plan(atlas.catalog, atlas.source, list(atlas.catalog.poles))
+    report = run_plan(plan, atlas.source, should_stop=lambda: True)
+    assert report.cancelled and report.fetched == 0
+
+
+def test_selections(atlas):
+    select = atlas.select
+    assert len(select(Selection(all=True))) == 9
+    assert fakeatlas.ISLAND_ONLY not in select(Selection(public_sample=True))
+    assert select(Selection(ids=["L4/E1/N10", "L9_E2_N20__neg", "nope"])) == [fakeatlas.RIVER, fakeatlas.MIXED, fakeatlas.DARK]
+    assert select(Selection(query=SearchQuery(q="cat:fn", limit=1))) == [fakeatlas.FN]
+    assert select(Selection(query=SearchQuery(q="layer:4"), ids=["L9_E2_N20__pos"])) == [fakeatlas.FN, fakeatlas.RIVER, fakeatlas.MIXED]
+    assert select(Selection(similar_to_text="chess opening names", top=1)) == [fakeatlas.MIXED]
+    assert select(Selection(similar_to_pole=fakeatlas.MIXED, top=2))[0] == fakeatlas.MIXED
+    assert len(select(Selection(all=True, max_poles=3))) == 3
+    assert select(Selection()) == []
+
+
+def test_circuit_neighbours_extend_a_selection_using_mirrored_files_only(atlas, upstream):
+    upstream.files["moe_circuit_explorer_data/L4_E1_N10/meta.json"] = upstream.files[
+        "moe_circuit_explorer_data/L4_E1_N10/meta.json"
+    ].replace(b"L5_E40_N500", b"L9_E2_N20")
+    sel = Selection(ids=[fakeatlas.RIVER], neighbours=1)
+    assert atlas.select(sel) == [fakeatlas.RIVER]  # nothing mirrored yet: nothing to follow
+    atlas.mirror(MirrorRequest(selection=Selection(ids=[fakeatlas.RIVER]), sources=["circuit"], index=False))
+    assert atlas.select(sel) == [fakeatlas.RIVER, fakeatlas.FN, fakeatlas.DARK]
+
+
+def test_mirror_then_search_deep_texts(atlas):
+    request = MirrorRequest(selection=Selection(ids=["L4_E1_N10"]), index_examples=True)
+    plan, report = atlas.mirror(MirrorRequest(selection=request.selection, dry_run=True))
+    assert report.fetched == 0 and len(plan.missing) == 11
+    plan, report = atlas.mirror(request)
+    assert report.fetched == 11 and report.failed == 0
+    stats = atlas.search_index.stats()
+    assert stats["poles_with_deep_texts"] == 2 and stats["example_texts"] > 0
+    assert atlas.search(SearchQuery(q="has:mirrored", limit=50)).total == 2
+    assert atlas.search("experiments OR Vienna").hits[0].matches[0].field in {"overview", "report"}
+
+
+def test_background_jobs(atlas):
+    jobs = MirrorJobs(atlas.source)
+    done = []
+    jobs.after = done.append
+    job = jobs.submit(make_plan(atlas.catalog, atlas.source, [fakeatlas.RIVER]), label="test")
+    deadline = time.time() + 10
+    while job.state not in ("done", "failed") and time.time() < deadline:
+        time.sleep(0.01)
+    info = job.as_dict()
+    assert info["state"] == "done" and info["progress"] == 1.0 and info["report"]["fetched"] == 7
+    assert done == [job] and jobs.get(job.id) is job and jobs.list() == [job]
+    assert not jobs.cancel(job.id) and not jobs.cancel("unknown")
+
+
+def test_mirror_all_and_ids_reach_neurons_without_poles(atlas):
+    everything = atlas.plan_mirror(MirrorRequest(selection=Selection(all=True)))
+    assert "L2_E5_N6" in everything.circuit_neurons
+    assert "moe_circuit_explorer_data/L2_E5_N6/meta.json" in everything.files
+    assert everything.estimate()["circuit_only_neurons"] == len(everything.circuit_neurons)
+    by_id = atlas.plan_mirror(MirrorRequest(selection=Selection(ids=["L2/E5/N6"])))
+    assert by_id.poles == [] and by_id.circuit_neurons == ["L2_E5_N6"] and by_id.size == 1
+    no_circuit = atlas.plan_mirror(MirrorRequest(selection=Selection(ids=["L2_E5_N6"]), sources=["overview"]))
+    assert no_circuit.circuit_neurons == []
+
+
+def test_a_job_that_cannot_fetch_anything_fails_and_indexes_nothing(settings):
+    import httpx
+
+    from neuron_atlas.mirror import MirrorPlan
+    from neuron_atlas.upstream import AtlasSource
+
+    def handler(request):
+        return httpx.Response(403, text="blocked")
+
+    with AtlasSource(settings, client=httpx.Client(transport=httpx.MockTransport(handler))) as src:
+        ran = []
+        jobs = MirrorJobs(src, after=ran.append)
+        plan = MirrorPlan(poles=[fakeatlas.RIVER], sources=("subcircuit",), missing=["subcircuit_modes_data/L4_E1_N10__pos.json"])
+        job = jobs.submit(plan, label="blocked")
+        deadline = time.time() + 10
+        while job.state in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.01)
+        assert job.state == "failed" and "403" in job.error and ran == []
+        jobs.shutdown()
+
+
+def test_max_poles_caps_poles_and_circuit_only_neurons_together(atlas):
+    capped = atlas.plan_mirror(MirrorRequest(selection=Selection(all=True, max_poles=3)))
+    assert capped.size == 3 and len(capped.poles) == 3 and capped.circuit_neurons == []
+    roomy = atlas.plan_mirror(MirrorRequest(selection=Selection(all=True, max_poles=10)))
+    assert len(roomy.poles) == 9 and roomy.circuit_neurons == ["L2_E5_N6"] and roomy.size == 10
+    est = roomy.estimate()
+    assert est["neurons"] == 5 and est["circuit_only_neurons"] == 1  # neurons of the poles, then the extra ones
+
+
+def test_a_job_that_stopped_early_keeps_and_indexes_what_it_fetched(settings, upstream):
+    import httpx
+
+    from neuron_atlas.mirror import MirrorPlan
+    from neuron_atlas.upstream import BREAKER_FAILURES, AtlasSource
+
+    served = []
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("good.json"):
+            served.append(url)
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(403, text="blocked")  # a WAF: the breaker stops the run
+
+    paths = [f"x/{i:02d}-good.json" for i in range(5)] + [f"y/{i:02d}.json" for i in range(BREAKER_FAILURES + 10)]
+    with AtlasSource(settings.with_overrides(max_concurrency=1), client=httpx.Client(transport=httpx.MockTransport(handler))) as src:
+        ran = []
+        jobs = MirrorJobs(src, after=ran.append)
+        job = jobs.submit(MirrorPlan(poles=[], sources=("subcircuit",), missing=paths), label="partly")
+        deadline = time.time() + 10
+        while job.state in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.01)
+        assert job.state == "done" and job.report.fetched == 5 and job.report.not_attempted > 0
+        assert job.error.startswith("stopped early") and ran == [job]
+        jobs.shutdown()
+
+
+def test_the_server_says_it_can_mirror_when_only_read_through_is_off(settings, upstream):
+    from starlette.testclient import TestClient
+
+    from neuron_atlas.api import create_app
+    from neuron_atlas.service import Atlas
+    from neuron_atlas.upstream import AtlasSource
+
+    strict = Atlas(source=AtlasSource(settings.with_overrides(allow_remote_fetch=False), client=upstream.client()))
+    with TestClient(create_app(strict, mcp=False)) as c:
+        info = c.get("/api/v1/info").json()["settings"]
+    strict.close()
+    assert info["can_fetch"] is False and info["can_mirror"] is True

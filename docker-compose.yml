@@ -1,0 +1,28 @@
+# docker compose up -d   ->   http://localhost:8000
+services:
+  atlas:
+    build: .
+    image: neuron-atlas-interface:latest
+    restart: unless-stopped
+    ports:
+      - "${ATLAS_PORT:-8000}:8000"
+    environment:
+      # Comma separated keys. Leave empty for an open (local / private network) server.
+      ATLAS_API_KEYS: "${ATLAS_API_KEYS:-}"
+      # Host names the server answers to besides localhost / 127.0.0.1 (comma separated), e.g. atlas.example.org.
+      # Requests under any other name are refused (protection against DNS rebinding).
+      ATLAS_ALLOWED_HOSTS: "${ATLAS_ALLOWED_HOSTS:-}"
+      # Let clients start downloads of atlas regions, and how many poles one job may cover.
+      ATLAS_ALLOW_MIRROR: "${ATLAS_ALLOW_MIRROR:-1}"
+      ATLAS_MAX_MIRROR_POLES: "${ATLAS_MAX_MIRROR_POLES:-500}"
+      # Politeness towards the upstream CDN.
+      ATLAS_REQUESTS_PER_SECOND: "${ATLAS_REQUESTS_PER_SECOND:-4}"
+      ATLAS_MAX_CONCURRENCY: "${ATLAS_MAX_CONCURRENCY:-4}"
+      # Per-client budget of the API itself (requests per minute, 0 = unlimited).
+      ATLAS_CLIENT_RATE_PER_MINUTE: "${ATLAS_CLIENT_RATE_PER_MINUTE:-0}"
+      ATLAS_CORS_ORIGINS: "${ATLAS_CORS_ORIGINS:-}"
+    volumes:
+      - atlas-data:/data
+
+volumes:
+  atlas-data:

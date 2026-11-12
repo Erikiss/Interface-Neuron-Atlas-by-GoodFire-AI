@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neuron Atlas Interface</title>
+<meta name="description" content="Inoffizielles Such-Interface für den Qwen3.6 Neuron Atlas von Goodfire AI: suchen, lesen, kopieren, drucken, exportieren.">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231a1a19'/%3E%3Cpath d='M16 6a10 10 0 0 0 0 20z' fill='%23e0561b'/%3E%3Cpath d='M16 6a10 10 0 0 1 0 20z' fill='%2333698a'/%3E%3C/svg%3E">
+<script>
+// Apply the saved theme and language before the first paint (no flash).
+(function () {
+  try {
+    var theme = localStorage.getItem('na.theme');
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    var lang = localStorage.getItem('na.lang');
+    if (lang === 'de' || lang === 'en') document.documentElement.lang = lang;
+  } catch (e) { /* storage unavailable */ }
+})();
+</script>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main" data-i18n="skip">Zum Inhalt springen</a>
+
+<header class="topbar no-print">
+  <div class="topbar-inner">
+    <a class="brand" href="#/search" aria-label="Neuron Atlas Interface">
+      <svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true" focusable="false">
+        <path d="M16 3a13 13 0 0 0 0 26z" fill="rgb(224,86,27)"/>
+        <path d="M16 3a13 13 0 0 1 0 26z" fill="rgb(51,105,138)"/>
+        <path d="M16 3v26" stroke="var(--surface)" stroke-width="2"/>
+      </svg>
+      <span class="brand-name">Neuron Atlas</span>
+      <span class="brand-tag" data-i18n="brand.tag">inoffiziell</span>
+    </a>
+    <nav class="mainnav" aria-label="Hauptnavigation" data-i18n-label="nav.main">
+      <a href="#/search" data-nav="search" data-i18n="nav.search">Suche</a>
+      <a href="#/map" data-nav="map" data-i18n="nav.map">Karte</a>
+      <a href="#/batch" data-nav="batch" data-i18n="nav.batch">Batch</a>
+      <a href="#/about" data-nav="about" data-i18n="nav.about">Über</a>
+    </nav>
+    <div class="topbar-tools">
+      <button type="button" class="btn btn-small" id="region-open" aria-label="Region herunterladen" title="Region herunterladen" data-i18n-label="nav.region">
+        <svg class="icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg>
+        <span class="region-label" data-i18n="nav.region">Region herunterladen</span>
+        <span class="count" id="region-badge" hidden></span>
+      </button>
+      <div class="langswitch" role="group" aria-label="Sprache" data-i18n-label="nav.language">
+        <button type="button" data-lang="de" aria-pressed="true">DE</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </div>
+      <button type="button" class="iconbtn" id="theme-toggle" aria-label="Dunkles Design" title="Dunkles Design"></button>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1"></main>
+
+<footer class="footer no-print">
+  <p>
+    <span data-i18n="footer.unofficial">Inoffizielles Interface. Der Neuron Atlas und alle Daten gehören Goodfire AI.</span>
+    <a href="https://www.goodfire.com/research/public_neuron_atlas" target="_blank" rel="noopener noreferrer" data-i18n="footer.original">Original-Atlas auf goodfire.com</a>
+    · <a href="/docs" target="_blank" rel="noopener noreferrer" data-i18n="footer.api">API-Dokumentation</a>
+    · <a href="/llms.txt" target="_blank" rel="noopener noreferrer">llms.txt</a>
+  </p>
+  <p class="muted" id="foot-state"></p>
+</footer>
+
+<div id="toasts" class="toasts no-print" aria-live="polite"></div>
+<div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+
+<noscript><p style="padding:2rem;font-family:sans-serif">Diese Seite braucht JavaScript. Die API ist ohne erreichbar: <a href="/docs">/docs</a>, <a href="/llms.txt">/llms.txt</a>.</p></noscript>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
