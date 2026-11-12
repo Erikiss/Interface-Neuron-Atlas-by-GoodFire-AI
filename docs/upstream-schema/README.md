@@ -19,8 +19,9 @@ defines what every field means) and from a small number of sample files of relea
 Reading notes:
 
 - Statements are marked as verified (from the JavaScript or the data) or inferred. Counts and value
-  ranges quoted "in the samples" come from six poles and three neurons only.
-- The notes quote short pieces of the explorer's own explanatory text because that text defines the
-  vocabulary. The atlas data itself is not part of this repository.
+  ranges given "in the samples" come from six poles and three neurons only.
+- The notes describe the explorer's fields and behaviour in our own words. They contain no text,
+  code or data copied from Goodfire's site beyond what is needed to name things (field names,
+  paths, ids, category keys, short labels). The atlas data itself is not part of this repository.
 - The parsers in `src/neuron_atlas/` follow these notes and are deliberately tolerant of missing
   or extra fields.

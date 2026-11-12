@@ -15,7 +15,7 @@ Legend used everywhere: **[V-JS]** = verified from the view pages' JavaScript (u
 |---|---|---|---|---|
 | `public_atlas_data/index.json` | global (neuron `did`, 2 poles each) | 3,244 neurons = 6,488 poles | shell (`explorer.html`) boot | master list: did, L/E/N, per pole `pid`, `cat`, `desc`, `islands` flag |
 | `public_atlas_data/islands/index.json` | global (pole `pid`) | 6,310 poles | islands page standalone list only | pid, L, pole, name (= `desc` of the master list) |
-| `public_atlas_data/islands/poles/{pid}.json` | pid | 6,310 expected | Modes tab fallback (poles without subcircuit read), landing "specimen" | islands (clusters of ~300 strongest firings), examples with +-120 token windows, "opus" modes |
+| `public_atlas_data/islands/poles/{pid}.json` | pid | 6,310 expected | Modes tab fallback (poles without subcircuit read), landing-page sample passage | islands (clusters of ~300 strongest firings), examples with +-120 token windows, "opus" modes |
 | `subcircuit_modes_index.json` | global (pid) | 5,477 poles | shell boot (`applySC`) | verdict, fn_mono, main_damage_share, counts, mode labels + shares |
 | `subcircuit_modes_data/{pid}.json` | pid | 5,477 expected | Modes tab; Overview tab (examples, subcircuit list) | modes, subcircuits (readings, 12 exemplars each, top-10 circuit units per lane), judge test |
 | `neuron_landscape_data/atlas_index.json` | global (pid list) | 5,477 pids | shell boot (decides whether the Overview tab exists) | bare JSON array of pids |
@@ -29,7 +29,7 @@ Legend used everywhere: **[V-JS]** = verified from the view pages' JavaScript (u
 | `moe_circuit_explorer_data/{did}/incidence.json` | did | 3,418 expected | Circuit tab | exemplar x route matrix |
 
 Referenced by the JavaScript but **absent from the local sample** (existence upstream NOT verified, do not assume):
-- `neuron_landscape_data/ctx/{pid}.json` - the Overview page fetches it and tolerates a miss. Comment: "full context (full_context.py): ~200 tokens before, 40 after, every token's activation recomputed". Shape used by the JS: `{modes: {<k>: [{a, s, f, toks:[[text, value|null], ...]}, ...]}}` (k = landscape mode index, `s` = subcircuit id string, `f` = focal index). [V-JS for shape, existence unknown]
+- `neuron_landscape_data/ctx/{pid}.json` - the Overview page fetches it and tolerates a miss. Shape used by the JS: `{modes: {<k>: [{a, s, f, toks:[[text, value|null], ...]}, ...]}}` (k = landscape mode index, `s` = subcircuit id string, `f` = focal index). [V-JS for shape, existence unknown]
 - `neuron_landscape_data/index.json` - only the standalone landscape page (no `shell=1`) loads it; rows carry `pid, layer, expert, neuron, sign, label, set, kind, kind_name, uid, n_open, n_closed, coverage`. It also lists "random baseline" units. [V-JS for shape, existence unknown]
 - `public_neuron_atlas.html` (link target inside the circuit page), `ns11_pages/explainer.html` (mentioned in a comment only).
 
@@ -52,9 +52,9 @@ Referenced by the JavaScript but **absent from the local sample** (existence ups
 | deep-link hash (subcircuit page) | `#L4-E1-N212-pos`, `-all`, `-m3` (1-based mode) | UI only |
 
 Non-standard ids:
-- `moe_circuit_explorer_data/index.json` holds 33 non-standard `did`s: 4 synthetic fixtures `DEMO_HUGE`, `DEMO_SPARSE`, `DEMO_FIXTURE`, `DEMO_LARGE` (labels say "DEMO fixture - synth..."; their `layer/expert/neuron` numbers are fake, e.g. neuron 15330) and 29 method variants of 6 real neurons with suffixes `_taylor`, `_taylor_dir`, `_taylor_hdb`, `_taylor_im`, `_relp_im`, `_relp_im_merged`, `_v2` (labels prefixed `[Taylor edges ...]`, `[RelP - Infomap ...]`). For these, `did != L{layer}_E{expert}_N{neuron}`. None of them is reachable from the public shell.
-- "shared expert" poles: the islands page's parser accepts `^L(\d+)_(?:E(\d+)|shared)_N(\d+)__(pos|neg)$` and prints "shared expert" [V-JS], but **no `_shared_` id occurs in any local index or sample** [V-DATA]. Treat as a possible but unobserved format; make the id regex tolerant.
-- Layers outside the sampled set: atlas poles live on layers 4, 9, 14, 19, 24, 30, 36, 39 (plus two hand-added neurons on 27 and 35). The MoE index additionally has 142 neurons on other layers (2-39). Circuit references (SC `circuit.*[].unit`, MoE members) span **all layers 0-39** (inputs 0-29, readers 5-39 in the samples) and are almost never atlas neurons themselves (see 3.5).
+- `moe_circuit_explorer_data/index.json` holds 33 non-standard `did`s: 4 synthetic fixtures `DEMO_HUGE`, `DEMO_SPARSE`, `DEMO_FIXTURE`, `DEMO_LARGE` (their `layer/expert/neuron` numbers are fake, e.g. neuron 15330) and 29 method variants of 6 real neurons with suffixes `_taylor`, `_taylor_dir`, `_taylor_hdb`, `_taylor_im`, `_relp_im`, `_relp_im_merged`, `_v2`. For these, `did != L{layer}_E{expert}_N{neuron}`. None of them is reachable from the public shell.
+- "shared expert" poles: the islands page's id parser also accepts the literal `shared` in place of `E{expert}` (`L{layer}_shared_N{neuron}__pos|neg`) [V-JS], but **no `_shared_` id occurs in any local index or sample** [V-DATA]. Treat as a possible but unobserved format; make the id regex tolerant.
+- Layers outside the sampled set: atlas poles live on layers 4, 9, 14, 19, 24, 30, 36, 39 (plus `L27_E247_N96` on 27 and `L35_E88_N30` on 35). The MoE index additionally has 142 neurons on other layers (2-39). Circuit references (SC `circuit.*[].unit`, MoE members) span **all layers 0-39** (inputs 0-29, readers 5-39 in the samples) and are almost never atlas neurons themselves (see 3.5).
 
 ### 1.3 Exact set sizes, intersections, differences [V-DATA]
 
@@ -78,35 +78,25 @@ Sets: `PA` = public_atlas neurons (3,244 dids; 6,488 poles, both poles always pr
 
 Structure of the three populations [V-DATA + V-JS]:
 - **Random sample**: 2,730 neurons on layers 4/9/14/19/24/30/36/39 (336/361/326/346/328/349/362/322 after removing the special sets) = 5,460 poles. Every one of these 5,460 poles is in X5477 (0 missing). 5,287 of them also have islands.
-- **Whole-expert set L14_E78**: all 512 neurons of layer 14 expert 78 are in PA and MOE; 1,019 of their poles have islands; only 13 of their poles (10 dids) are in X5477. The shell excludes them. Comment: "not part of the random neuron sample, so kept out of the public atlas (Curt 11-07): the whole-expert L14 E78 set and two hand-added neurons".
-- **Hand-added**: `L27_E247_N96`, `L35_E88_N30` (islands only).
+- **Expert L14_E78, all 512 neurons**: all are in PA and MOE; 1,019 of their poles have islands; only 13 of their poles (10 dids) are in X5477. The shell excludes them.
+- **Two extra neurons** (the shell's `NOT_SAMPLE` set): `L27_E247_N96`, `L35_E88_N30` (islands only).
 - So X5477 = 5,460 + 13 (L14_E78) + 4 (two neurons not in PA).
 
 ### 1.4 The public shell shows a fixed 3,000-pole sample [V-JS, re-implemented and V-DATA]
 
-`explorer.html` filters PA to the 2,730 sample neurons, lists their 5,460 poles, sorts them by `rhash(pid)` and keeps the first `SAMPLE_SIZE = 3000`:
-
-```
-RSEED = 20261109
-rhash(t): h = (2166136261 ^ RSEED) >>> 0
-          for each char c: h ^= c; h = imul(h, 16777619) >>> 0
-          h ^= h >>> 15; h = imul(h, 2246822507) >>> 0; h ^= h >>> 13; return h >>> 0
-order: ascending rhash(pid), ties by pid string
-```
+`explorer.html` filters PA to the 2,730 sample neurons, lists their 5,460 poles, sorts them by a seeded 32-bit hash of the pid (ascending, ties by pid string) and keeps the first 3,000 (`SAMPLE_SIZE`). The hash is FNV-1a with seed 20261109 plus a final mixing step; formula in [`shell.md`](shell.md) 2.2, implementation in `src/neuron_atlas/catalog.py`.
 
 Re-implementing this gives 3,000 poles on 2,202 neurons; first five: `L24_E31_N88__neg, L14_E227_N460__pos, L4_E247_N291__pos, L24_E103_N302__neg, L4_E164_N6__pos`. All 3,000 are in X5477; 2,906 have islands; 2,201 of the 2,202 neurons are in the MoE index (missing `L4_E206_N45`); 334 have a `sim` score. Per layer: 364/389/352/374/369/389/409/354. The default layer filter ("Layers 9-36") leaves 2,282. Categories after `applySC`: single mode 1,169, one dominant mode 922, multiple modes 892, not yet read 15, uninterpretable 2.
 The other 2,477 poles of X5477 (and all 6,310 island files, all 3,418 MoE bundles) are not linked from the shell but their files follow the same path patterns.
 
 ### 1.5 How the shell derives a pole's category and description [V-JS]
 
-```
-p = index.neurons[i].poles["+"|"-"];  r = subcircuit_modes_index.poles[p.pid]
-if r and r.n_modes > 0:  p.cat = r.verdict=="monosemantic" ? "mono" : r.fn_mono ? "fn" : "poly"
-                         p.desc = r.modes.map(m => m.label).join(" · ")      // island values kept as cat_isl / desc_isl
-if r and r.n_modes == 0: "failed read" - keeps the island category and island view   (51 poles in the index)
-else:                    island cat/desc (mono | poly | dark | null)
-```
-Category words and definitions (verbatim): mono "single mode" - "Everything this pole fires on fits one specific meaning."; fn "one dominant mode" - "This pole has more than one mode, but the main one accounts for at least 90% of the damage when the neuron is switched off."; poly "multiple modes" - "This pole fires on two or more different, unrelated things."; dark "uninterpretable" - "No clear pattern was found in what this pole fires on."; none "not yet read" - "This pole has not been read yet."
+For each pole of `public_atlas_data/index.json`, the shell looks up its pid in `subcircuit_modes_index.json` `poles`:
+- entry with `n_modes` > 0: `cat` = `mono` if `verdict` is `monosemantic`, else `fn` if `fn_mono`, else `poly`; `desc` = the `modes[].label` values joined by " · "; `cat_isl` / `desc_isl` receive the previous island `cat` / `desc`;
+- entry with `n_modes` = 0 (failed read, stored as `sc_empty`; 51 poles in the index): `cat` / `desc` unchanged; Modes tab = islands page if the pole has islands, else subcircuit page;
+- no entry: island `cat` / `desc` unchanged (`mono` | `poly` | `dark` | null).
+
+UI labels of the category keys: `mono` "single mode", `fn` "one dominant mode", `poly` "multiple modes", `dark` "uninterpretable", `none` "not yet read" (each label has a tooltip, not reproduced here; decision table in [`shell.md`](shell.md) 2.3).
 Over all 5,477 indexed poles: monosemantic 2,122; polysemantic with `fn_mono` 1,651; polysemantic without 1,704.
 
 ---
@@ -125,7 +115,7 @@ Columns: JSON path | type | optional? | meaning | example. "opt" = may be missin
 | `.poles` | dict with exactly `"+"` and `"-"` | no | both poles always present | - |
 | `.poles.X.pid` | str | no | pole id | `L4_E1_N177__pos` |
 | `.poles.X.cat` | str or null | null for 178 | island-era category: `mono` 4,042, `poly` 1,922, `dark` 346, null 178 [V-JS words above] | `mono` |
-| `.poles.X.desc` | str | `""` for 524 (all `dark` + null) | island-era description; median 95 chars, max 423; all 5,964 non-empty values distinct | `The word "private" in any sense, strongest as the army rank ("Pvt"), ...` |
+| `.poles.X.desc` | str | `""` for 524 (all `dark` + null) | island-era description; median 95 chars, max 423; all 5,964 non-empty values distinct | `"…"` |
 | `.poles.X.islands` | bool | no | an islands pole file exists (true for 6,310) [V-DATA equals islands index] | true |
 
 ### 2.2 `public_atlas_data/islands/index.json` (1,009,046 bytes)
@@ -140,26 +130,26 @@ Columns: JSON path | type | optional? | meaning | example. "opt" = may be missin
 | `built_at` | str ISO-8601 | no | build time | `2026-11-05T21:15:39Z` |
 | `poles{pid}` | dict[5477] | no | one entry per pole | - |
 | `.verdict` | `monosemantic`\|`polysemantic` | no | [V-JS] used for category | `polysemantic` |
-| `.fn_mono` | bool | no | "functionally mono": more than one meaning but the main one carries >= 90% of KL damage [V-JS tooltip] | true |
-| `.main_damage_share` | float 0-1 or null | null for 81 | share of the pole's damage carried by the main mode [V-JS] | 0.978 |
+| `.fn_mono` | bool | no | UI category `fn`; true only on polysemantic poles, and there exactly when `main_damage_share` is above 0.9 (values rounded to 3 decimals; 0.9 itself occurs with both flags) [V-DATA] | true |
+| `.main_damage_share` | float 0-1 or null | null for 81 | part of the KL damage attributed to the main mode [V-JS] | 0.978 |
 | `.n_modes` | int 0-30 | no | number of non-residue modes; = `len(modes)` for all poles; 0 for 51 "failed reads" | 3 |
 | `.n_residue` | int 0-5 | no | number of residue modes (unreadable / closed-gate) | 1 |
 | `.n_subcircuits` | int 1-51 | no | subcircuit count (mean 19.9, total 109,218) | 16 |
 | `.modes[]` | list | may be empty | **non-residue modes only, in published order** [V-DATA equals SC file] | - |
-| `.modes[].label` | str | no | mode name (10-384 chars, median 76) | `Completing terms/operands of written-out polynomials ...` |
-| `.modes[].share` | float (34 ints: 0) | no | share of the pole's 5,000 sampled firings; per-pole sums range 0-1.0004, median 0.71 (the rest is residue/closed-gate) | 0.8008 |
+| `.modes[].label` | str | no | mode name (10-384 chars, median 76) | `"…"` |
+| `.modes[].share` | float (34 ints: 0) | no | fraction of the 5,000 firings sampled for the pole; per-pole sums range 0-1.0004, median 0.71 (the rest is residue/closed-gate) | 0.8008 |
 
 ### 2.4 `ns11_pages/data/index.json` (291,937 bytes)
 
 | Path | Type | Meaning |
 |---|---|---|
-| `pids[]` | list[5477] str | poles that have an Overview [V-JS: `S.ov`] |
+| `pids[]` | list[5477] str | pids with an Overview page [V-JS: `S.ov`] |
 | `model{pid}` | str `opus` \| `glm` | which "neuron scientist" model wrote the pole's account [I; the pole file has `scientist_model: "claude-opus-5-5"` in all 6 samples, no `glm` sample available] |
-| `sim{pid}` | float, 585 keys, range -33.6 .. 0.9987, median 0.61, 12 negative, 6 below -1 | **simulatability** [V-JS]: "when the neuron's activations are simulated from this description on held-out text, N% of its effect on the model's predictions is recovered"; "below zero: the simulation does more damage than switching the neuron off"; shown as "< -100%" when below -1; missing = "Not scored" |
+| `sim{pid}` | float, 585 keys, range -33.6 .. 0.9987, median 0.61, 12 negative, 6 below -1 | **simulatability** of the pole's description, as a fraction (definition in [`shell.md`](shell.md) section 3) [V-JS]; shown as a percentage, as "< -100%" when below -1; missing = "Not scored" |
 
 ### 2.5 `ns11_pages/headline_overrides.json` (969,588 bytes, pretty-printed one per line)
 
-`{pid: str}` for 5,469 pids; 91-236 chars, median 148. [V-JS] the Overview shows this instead of `explain.headline`: "Rewritten to lead with what carries the damage, from the modes below. The neuron scientist's original title is in the page data."
+`{pid: str}` for 5,469 pids; 91-236 chars, median 148. [V-JS] the Overview shows this instead of `explain.headline`.
 
 ### 2.6 `neuron_landscape_data/atlas_index.json` (115,613 bytes)
 
@@ -173,7 +163,7 @@ Bare JSON array of 5,477 pids (the shell also accepts `{pids:[...]}`) [V-JS].
 | `built_at` | str | no | build time | `2026-10-15T23:26:20Z` |
 | `neurons[].did` | str | no | neuron id or non-standard id (1.2) | `L2_E171_N100` |
 | `.layer .expert .neuron` | int | no | coordinates (fake for DEMO_*) | 2, 171, 100 |
-| `.label` | str | 1 empty | = `meta.identity.labels.short_title_pos` = `pole_view["+"].line` in 3/3 samples [V-DATA]; 2,058 start "Fires on", 541 start "no discriminative reading" (UI rewrites that prefix to "Uninterpretable: ") | `Fires on the final token of "serine" ...` |
+| `.label` | str | 1 empty | = `meta.identity.labels.short_title_pos` = `pole_view["+"].line` in 3/3 samples [V-DATA]; 2,058 start "Fires on", 541 start "no discriminative reading" (UI rewrites that prefix to "Uninterpretable: ") | `"…"` |
 | `.n_ex` | int 5-1800 (median 283, mean 263.3) | no | number of exemplars = `len(exemplars.json)` [V-DATA 3/3] | 295 |
 | `.act_max` `.act_min` | float | no | strongest positive / negative raw activation among exemplars [V-DATA matches sample exemplars] | 4.5148, -5.9223 |
 | `.dark` | str `""`, `"+"`, `"-"`, `"+-"` | no | which poles are "dark" [I] | `"-"` |
@@ -189,22 +179,22 @@ Note: the MoE verdict vocabulary is not the same reading as PA `cat` (e.g. PA mo
 |---|---|---|---|---|
 | `pid, did, pole, layer, expert, neuron` | str/int | no | identity | - |
 | `sign` | int +1/-1 | no (JS falls back to `pole`) | pole sign | 1 |
-| `islands[]` | list (2-12 in samples) | may be empty [V-JS handles] | clusters of the pole's strongest firings "that occur in similar contexts" [V-JS intro] | - |
+| `islands[]` | list (2-12 in samples) | may be empty [V-JS handles] | clusters of the pole's strongest firings [V-JS] | - |
 | `.id` | int | no | island id (0-based; UI shows id+1) | 1 |
 | `.n` | int | no | examples in the island; sums to 270-300 per pole [V-DATA] | 112 |
-| `.name` | str 19-82 | may be empty (UI "(unnamed island)") | LLM name | `Base64 blob interior characters` |
+| `.name` | str 19-82 | may be empty (UI "(unnamed island)") | LLM name | `"…"` |
 | `.description` | str 164-363 | opt | LLM description; uses «...» to mark the firing token | - |
 | `.examples[]` | list[5] | no | 5 sampled examples; `label` in `top` / `median` / `random` (UI: Strongest / Typical / Random) | - |
-| `.examples_more[]` | list[3-7] | opt | extra examples, `label:"band"`, "from strongest to weakest" | - |
+| `.examples_more[]` | list[3-7] | opt | extra examples, `label:"band"`, ordered by decreasing strength | - |
 | `..act` | float | no | raw peak activation, signed (sign matches pole in all examples) | 4.0625 |
-| `..a_over_theta` | float >= 1.26 or null | opt | `abs(act)/theta` with the **per-neuron** theta (see 3.6); tooltip: "the example's peak divided by the activation at which this pole typically starts to fire" | 5.041 |
-| `..tokens[]` | list of `[text:str, value:float]`, up to 241 | no | passage window, about 120 tokens each side; values are raw signed activations (not theta units), never null | `["n", 3.875]` |
+| `..a_over_theta` | float >= 1.26 or null | opt | `abs(act)/theta` with the **per-neuron** theta (see 3.6) | 5.041 |
+| `..tokens[]` | list of `[text:str, value:float]`, up to 241 | no | passage window, about 120 tokens each side; values are raw signed activations (not theta units), never null | `["…", 3.875]` |
 | `..focal_idx` | int (120 unless the passage is short) | JS tolerates null | index of the firing token | 120 |
 | `examples_more_n` | int | no | max extras per island (7) [I] | 7 |
-| `opus.modes[]` | list (1-3) | no | LLM-judge grouping of islands into modes | - |
+| `opus.modes[]` | list (1-3) | no | modes, each a set of islands chosen by an LLM (key name `opus`) | - |
 | `.name` `.predicate` | str | predicate may be `""` | mode name / description | - |
-| `.island_ids[]` | list[int] | no | member island ids (an island may appear in 2 modes: "the reader split one island" [V-JS]) | `[0,1,4,5]` |
-| `.chips[]` | list[str] 0-1 | no | the only place the share lives: text `"firing 74.2%"`, parsed by regex `^firing\s+([\d.]+)%` [V-JS] | `["firing 74.2%"]` |
+| `.island_ids[]` | list[int] | no | member island ids (an island may belong to 2 modes [V-JS]) | `[0,1,4,5]` |
+| `.chips[]` | list[str] 0-1 | no | the only place the share lives: text `"firing 74.2%"`; the page takes the number after `firing` as the share in percent [V-JS] | `["firing 74.2%"]` |
 | `.grey` | bool true | opt | the "unassigned" bucket (name `unassigned`) | true |
 
 ### 2.9 Subcircuit pole file `subcircuit_modes_data/{pid}.json`
@@ -212,58 +202,58 @@ Note: the MoE verdict vocabulary is not the same reading as PA `cat` (e.g. PA mo
 | Path | Type | Opt | Meaning | Example |
 |---|---|---|---|---|
 | `pid, layer, expert, neuron, sign` | str/int | no | identity (`sign` +1/-1) | - |
-| `theta` | float | no | **per-pole** firing threshold in raw activation units; "every value on this page is in units of theta" [V-JS] | 0.3192148 |
+| `theta` | float | no | **per-pole** firing threshold in raw activation units [V-JS] | 0.3192148 |
 | `label` | str 359-590 | no | "Autointerp label" of the neuron (= MoE `fleet_label`, hidden in the public view) [V-DATA] | - |
 | `summary` | str 570-758 | no | LLM summary of the pole | - |
-| `closed_share` | float 0-1 | no | "share of the pole's firings where the gate pre-activation was negative" [V-JS] | 0.3616 |
+| `closed_share` | float 0-1 | no | fraction of firings with gate pre-activation < 0 [V-JS] | 0.3616 |
 | `n_firings` | int | no | firings sampled (5,000 in all samples) | 5000 |
 | `verdict` | str | no | monosemantic / polysemantic | - |
 | `fn_mono`, `main_damage_share` | bool, float or null | no | as in the index | - |
 | `kl_neuron_mean` | float | no | the pole's mean KL damage per firing; `kl.ratio = kl.per_firing / kl_neuron_mean` [V-DATA] | 2.92e-4 |
-| `partition` | str | no | "the partition of firings into subcircuits" (clustering config id) | `leiden_drvopp_m30__res1.0` |
+| `partition` | str | no | id of the clustering configuration that produced the subcircuits | `leiden_drvopp_m30__res1.0` |
 | `judge.opus` | dict | empty in samples | held-out matching test with Opus as judge, per bin | `{}` |
-| `judge.jev.{all,ge1,mid,weak,closed}` | `{n:int, acc:float, chance:float}` | `mid`/`weak` may be missing | "How often a blind judge assigns a held-out firing to its own subcircuit, by firing strength"; bins = all, >= theta, 0.5-1 theta, < 0.5 theta, closed gate; "Chance is the sum of squared subcircuit shares in that bin" [V-JS] | `{"n":1257,"acc":0.448,"chance":0.179}` |
+| `judge.jev.{all,ge1,mid,weak,closed}` | `{n:int, acc:float, chance:float}` | `mid`/`weak` may be missing | judge test on held-out firings per strength bin: `acc` = fraction matched to the correct subcircuit, `chance` = Σ share² over the subcircuits within the bin; bins = all, >= theta, 0.5-1 theta, < 0.5 theta, closed gate [V-JS] | `{"n":1257,"acc":0.448,"chance":0.179}` |
 | `modes[]` | list (3-21) | no | non-residue modes in published order, then residue modes | - |
-| `.label` | str | no | mode name; residue labels: `Closed-gate firings (silu leak)`, `Residue (unreadable)`, `Residue: ...` (public view replaces them by "Q3/Q4 firings (gate input negative)" / "Unassigned examples") [V-JS] | - |
+| `.label` | str | no | mode name; residue modes carry fixed labels, which the public view replaces by its own closed-gate and unassigned labels [V-JS] | - |
 | `.description` | str 29-408 | no | mode description | - |
 | `.subcircuits[]` | list[str] 0-38 | may be `[]` | member subcircuit ids | `["c2","c3"]` |
 | `.share` | float | no | share of the 5,000 firings; sums to about 1.0 over all modes incl. residue | 0.4421 |
 | `.n_firings` | int | missing on residue modes | = sum of member subcircuit `n` [V-DATA] | 2201 |
-| `.unique_contexts`, `.top_context_share` | int, float or null | mostly null | distinct 16-token contexts; share of the most repeated context (UI warns at >= 0.5: "one repeated context = N% of firings") | - |
-| `.merged_from[]` | list[str] or null/missing | opt | earlier mode labels combined "by the long-context review" | - |
-| `.kl` | `{per_firing:float, ratio:float}` or null | null when share is 0 | damage per firing in nats, and relative to the pole's average ("KL over the next 16 tokens") [V-JS] | `{"per_firing":6.5e-4,"ratio":2.24}` |
+| `.unique_contexts`, `.top_context_share` | int, float or null | mostly null | distinct 16-token contexts; share of the most repeated context (UI shows a warning at >= 0.5) | - |
+| `.merged_from[]` | list[str] or null/missing | opt | labels of earlier modes merged into this one (pipeline history) | - |
+| `.kl` | `{per_firing:float, ratio:float}` or null | null when share is 0 | `per_firing` = mean KL damage per firing (nats, 16-token window); `ratio` = `per_firing / kl_neuron_mean` [V-JS + V-DATA] | `{"per_firing":6.5e-4,"ratio":2.24}` |
 | `.residue` | bool true | only on residue modes | - | - |
 | `.closed_gate` | bool true | only on the closed-gate residue mode | - | - |
 | `.residue_source` | str | rare | e.g. `long-context review` | - |
-| `subcircuits{c<k>}` | dict (17-40) | no | "clusters of firings that share the same upstream circuit evidence" | - |
+| `subcircuits{c<k>}` | dict (17-40) | no | the pole's subcircuits (firing clusters from the `partition` clustering), keyed by id | - |
 | `.id, .n, .share` | str, int, float | no | id, firings, share of the pole (`n/5000`) | `c2`, 366, 0.0735 |
 | `.profile.{ge_theta,mid,weak,closed}` | float, sums to 1 | no | strength profile: >= theta, 0.5-1 theta, < 0.5 theta, closed gate | - |
 | `.median_a_rel` | float | no | median firing strength in theta units [I] | 1.792 |
-| `.meaning` | str 160-628 | no | "Text reading": what the subcircuit fires on, read from text alone | - |
+| `.meaning` | str 160-628 | no | "Text reading" in the UI: LLM reading from the example texts | - |
 | `.token_pattern` | str 98-343 | no | which token fires | - |
-| `.function` | str 297-733 | no | "Circuit" reading written from contrastive circuit evidence (hidden in public view) | - |
+| `.function` | str 297-733 | no | "Circuit" reading in the UI: LLM reading from the subcircuit's circuit table (hidden in public view) | - |
 | `.function_label` | str 40-94 | no | card title of the subcircuit | - |
 | `.gate_role`, `.up_role` | str 75-298 | no | what opens the gate / sets the up signal | - |
-| `.readable` | bool | no | false = "Opus marked this subcircuit as unreadable" | - |
+| `.readable` | bool | no | false = unreadable subcircuit [V-JS] | - |
 | `.reading_confidence`, `.function_confidence` | int 1-5 | no | LLM self-rated confidence [I] | 4 |
 | `.circuit_desc`, `.circtext_desc` | null in all samples | - | optional long descriptions | null |
 | `.spec_flags[]` | list of `{rejected:str, p:float, p_after:0.0\|1.0}` or null | opt | rejected alternative readings with probabilities [I, not shown by the page] | - |
 | `.circuit.{gate_drivers,gate_opposers,up_drivers,up_opposers,readers}[]` | list[10] each | no | top-10 other neurons per role | - |
 | `..unit` | str did | no | the other neuron (any layer) | `L28_E132_N167` |
-| `..leaf` | float | no | "the unit's mean contribution over this subcircuit's firings"; non-negative in the four input lanes, signed for readers [V-JS + V-DATA] | 0.0164 |
-| `..rest` | float >= 0 | no | "its mean over the pole's other firings" | 0.0001 |
+| `..leaf` | float | no | `mean(contrib(unit, f))` over f in the subcircuit; non-negative in the four input lanes, signed for readers [V-JS + V-DATA] | 0.0164 |
+| `..rest` | float >= 0 | no | the same quantity over f outside the subcircuit (the pole's remaining firings) | 0.0001 |
 | `..label` | str <= 220 (truncated) or `(no label)` | no | autointerp label of that unit | - |
 | `.unique_contexts`, `.top_context_share` | int, float | no | as for modes | - |
 | `.kl` | `{per_firing, ratio, n_measured:int}` | no | damage for this subcircuit; `n_measured` = tested firings (5-101) | - |
-| `.exemplars[]` | list[12] | no | "its 4 strongest firings, 4 around its median, and its 4 weakest, each from a distinct context" [V-JS] | - |
+| `.exemplars[]` | list[12] | no | three groups of 4: strongest, near the median, weakest; `a_rel` descending within the first two groups, ascending within the last [V-DATA: all 170 sample subcircuits]; one exemplar per context [V-JS], yet 6 of the 170 contain two exemplars with the same 16 preceding tokens [V-DATA] | - |
 | `..a` | float signed | no | raw activation at the firing token | 2.6349 |
 | `..a_rel` | float > 0 | no | `abs(a)/theta` [V-DATA max error 7e-4] | 8.254 |
 | `..closed` | bool | no | gate pre-activation negative ("Q3/Q4") | false |
 | `..fold` | `fit` \| `audit` | no | discovery fold / held-out fold | `fit` |
 | `..pre` | str 0-300 chars | may be `""` | text before the token window (last <= 300 characters) | - |
-| `..tokens[]` | list[33] of `[text, value\|null]` | no | 16 tokens before, the firing token, 16 after; value = **signed activation / theta** (multiply by `sign` for pole direction); null = "expert not routed"; `""` text = padding at document edges | `["d", 8.223]` |
+| `..tokens[]` | list[33] of `[text, value\|null]` | no | 16 + 1 + 16 tokens (firing token at index 16); value = **signed activation / theta** (multiply by `sign` for pole direction); null = expert not routed on that token; `""` text = padding at document edges | `["…", 8.223]` |
 | `..focal` | int = 16 | no | index of the firing token | 16 |
-| `..repeats` | int >= 1 | no | firings of the subcircuit sharing "the same 16 tokens up to the firing token" | 1 |
+| `..repeats` | int >= 1 | no | `#{f ∈ subcircuit : ctx16(f) = ctx16(exemplar)}`, ctx16 = the 16-token context also counted by `.unique_contexts` [V-JS] | 1 |
 | `modes_before_unify[]`, `verdict_before_unify`, `review_verdict`, `verdict_source`, `unified_description` | list/str | missing in 1 of 6 (the failed read) | pipeline history: modes before the "long-context unifier", its verdicts, and a long unified description (677-1,110 chars) [I, unused by the page] | - |
 
 ### 2.10 Landscape pole file `neuron_landscape_data/{pid}.json`
@@ -271,36 +261,36 @@ Note: the MoE verdict vocabulary is not the same reading as PA `cat` (e.g. PA mo
 | Path | Type | Opt | Meaning | Example |
 |---|---|---|---|---|
 | `pid, layer, expert, neuron, sign, verdict, n_firings` | - | no | identity; `n_firings` 5,000 | - |
-| `modes[]` | list K (3-21) | no | order: **open modes** (same order as the SC non-residue modes), then **Q3/Q4 ("closed") modes**, and the **last entry is always "Unassigned examples (fit no mode)"** [V-JS + V-DATA] | - |
+| `modes[]` | list K (3-21) | no | order: **open modes** (same order as the SC non-residue modes), then **Q3/Q4 ("closed") modes**, and the **last entry is always the unassigned bucket** [V-JS + V-DATA] | - |
 | `.label`, `.description` | str | description may be `""` | mode name / reading. For open modes identical to SC; Q3/Q4 mode labels exist only here | - |
 | `.share` | float or null (unassigned) | - | share of the 5,000 sampled firings (= sum of member subcircuit shares) [V-DATA]; **not** the population-weighted share the UI prints | 0.4421 |
 | `.kl_per_firing` | float or null | null for closed/unassigned | = SC `modes[].kl.per_firing` | 6.5e-4 |
-| `.closed` | bool (absent on the last entry) | - | Q3/Q4 mode: "Firings where the neuron's gate input is negative (quadrants 3 and 4 of the gate x up plane)" [V-JS] | false |
-| `.rel` | null or `NEW` \| `SAME` \| `SUBCASE` \| `SUPERSET` | closed modes only | relation to an open mode: SAME "Same meaning as", SUBCASE "A narrower case of", SUPERSET "A broader version of another mode", NEW "A meaning of its own" [V-JS] | `NEW` |
+| `.closed` | bool (absent on the last entry) | - | true = Q3/Q4 mode (gate pre-activation < 0) [V-JS] | false |
+| `.rel` | null or `NEW` \| `SAME` \| `SUBCASE` \| `SUPERSET` | closed modes only | relation to an open mode: `SAME` (same meaning), `SUBCASE` (narrower), `SUPERSET` (broader), `NEW` (no open counterpart) [V-JS] | `NEW` |
 | `.fold` | int or null | closed modes only | index of the open mode it shares meaning/colour with (may be null even when rel is SAME) | 0 |
-| `bands[]` | list[5] | no | rarity levels, weakest first: `p95, p99, p99.9, p99.99, top 1,000`; UI names "Top 5%", "Top 1%", "Top 0.1%", "Top 0.01%", "Strongest 1,000" | - |
+| `bands[]` | list[5] | no | rarity bands, index 0-4 = `p95, p99, p99.9, p99.99, top 1,000` (0 = weakest) | - |
 | `.a_med, .a_min, .a_max` | float | no | firing strength in theta units within the band | 0.455 |
 | `.mass` | float | no | fraction of all tokens in the band (0.04, 0.009, 0.0009, ~9.5e-5, ~2e-6..7e-6); UI "1 in N tokens" = 1/mass [V-JS] | 0.04 |
 | `.n` | int 1000 | no | firings sampled in the band | 1000 |
 | `.counts[K]` | list[int], sums to n | no | sampled firings per mode | - |
 | `.dmg_lin[K]` | list[float] | absent for units without damage data (`has_kl:false`, not in samples) | summed KL damage of the band's firings per mode (measured or estimated); mean damage per firing of the band = `sum(dmg_lin)/n` [V-JS] | - |
 | `.dmg[K]` | list[float] | - | another damage aggregate per mode, not used by any page [I, formula unknown] | - |
-| `kl_fit` | `{slope, r2, n, q}` | no | log-log fit damage vs strength over the tested firings; `n` = tested firings (179-415), `q` = 0.25 [V-JS uses n only] | - |
+| `kl_fit` | `{slope, r2, n, q}` | no | linear fit of log damage on log strength; `n` = firings with measured damage (179-415), `q` = 0.25 [V-JS uses n only] | - |
 | `order[K-1]` | list[int], permutation of 0..K-2 | no | lane order (older) | - |
 | `sim` | (K-1)x(K-1) float matrix or **null** (null when K-1 = 2 in 2 samples) | opt | symmetric, diagonal 1, range 0.011-1; an earlier mode-similarity matrix [I, unused] | - |
-| `rel_sim` | (K-1)x(K-1) float matrix | no | symmetric, diagonal 1, range 0.40-1; "topic-embedding relatedness of the mode descriptions" (from the comment about `add_rel_colours.py`) [V-JS comment, matrix itself unused] | - |
-| `rel_order[K-1]` | permutation | opt (JS falls back to `order`) | lane order so "related meanings ... sit side by side" | - |
-| `rel_col[K-1]` | list of `#rrggbb` | opt | one colour per mode, "related meanings get nearby hues"; shared by Overview and landscape | `#008b85` |
-| `dots[]` | list (929-1,165) | no | sampled firings; "Each dot is one place in real text where this pole of the neuron fired" | - |
+| `rel_sim` | (K-1)x(K-1) float matrix | no | symmetric, diagonal 1, range 0.40-1; similarity of mode-description embeddings (source: a JS comment naming `add_rel_colours.py`) [V-JS comment, matrix itself unused] | - |
+| `rel_order[K-1]` | permutation | opt (JS falls back to `order`) | lane order (seriation by relatedness) [V-JS comment] | - |
+| `rel_col[K-1]` | list of `#rrggbb` | opt | one colour per mode; shared by Overview and landscape | `#008b85` |
+| `dots[]` | list (929-1,165) | no | sampled firings, one per dot | - |
 | `.b` | int 0-4 | no | band index | 0 |
 | `.a` | float | no | strength in theta units ("N x threshold") | 0.449 |
 | `.m` | int 0..K-1 | no | landscape mode index | 7 |
 | `.s` | int, -1 = none | no | subcircuit number (`c{s}` in SC) [V-DATA: consistent for every dot in open modes; not read by the page] | 0 |
-| `.c` | bool | no | "gate input negative" | true |
-| `.kl` | float or null (null for ~75%) | opt | measured KL damage (nats, 16 tokens) when the neuron is zeroed at this firing; 0 possible | 1.39e-8 |
-| `.lk` | float | no | log10 damage: measured where `kl>0`, otherwise "estimated from strength and mode" | -7.857 |
+| `.c` | bool | no | gate pre-activation < 0 (Q3/Q4) | true |
+| `.kl` | float or null (null for ~75%) | opt | measured KL damage (nats, 16-token window) of zero-ablating the neuron at this firing; 0 possible | 1.39e-8 |
+| `.lk` | float | no | log10 damage: measured where `kl>0`, otherwise an estimate based on `a` and `m` | -7.857 |
 | `.w` | float | no | population weight relative to band 0 = `(mass/n) / (mass0/n0)` [V-DATA] | 1.0 |
-| `.t[]` | list (13-113) of `[text, value\|null]` | no | context; the first `u` tokens are plain context without values; later nulls = not routed to the expert; values in theta units, pole direction positive | `[" John", 0.46]` |
+| `.t[]` | list (13-113) of `[text, value\|null]` | no | context; the first `u` tokens are plain context without values; later nulls = not routed to the expert; values in theta units, pole direction positive | `["…", 0.46]` |
 | `.f` | int (100 typical) | no | index of the firing token; normally `f-u = 16` and 12 tokens follow | 100 |
 | `.u` | int (84 typical, 0 possible) | no | number of leading value-less context tokens | 84 |
 
@@ -314,23 +304,23 @@ Optional fields read by the JS but absent in all 6 samples: `has_kl`, `set` (`"r
 | `atlas_label` | str 16-97 | no | the island-era pole description (= PA `desc`; "No clear pattern" when empty) [V-DATA] | no |
 | `cat`, `cat_public` | str | no | `mono`/`poly` and `single mode`/`multiple modes` | no |
 | `threshold_raw` | float | no | = SC `theta` exactly [V-DATA 6/6] | no |
-| `pick`, `first_hypothesis` | str 1.9-2.3 k chars | no | "The scientist's final description" (plain text with paragraphs); the two are identical in 6/6 samples | `pick` yes |
-| `report` | str 2.6-3.3 k chars, Markdown | no | "The scientist's full report" | yes |
+| `pick`, `first_hypothesis` | str 1.9-2.3 k chars | no | final write-up of the scientist (plain text with paragraphs); the two are identical in 6/6 samples | `pick` yes |
+| `report` | str 2.6-3.3 k chars, Markdown | no | long Markdown report of the scientist | yes |
 | `learned` | null | - | unused | no |
-| `kl` | dict, **empty in all samples** | - | when filled: keys among `fleet, g5m, census, h1, own`, each `{label, kl_recovered}`; section "How well the description predicts the neuron" [V-JS] | yes |
+| `kl` | dict, **empty in all samples** | - | when filled: keys among `fleet, g5m, census, h1, own`, each `{label, kl_recovered}`; shown in its own Overview section [V-JS] | yes |
 | `explain.headline` | str 95-118 | no | scientist's title (replaced by the override) | yes |
 | `explain.summary` | str 678-1,009 | no | plain-language summary | yes |
-| `explain.situations[]` | list 2-20 of `{mode:int, name, explain, typical, cue, scientist}` | no | one paragraph per mode on multi-mode poles (`mode` = mode index); on single-mode poles the entries are facets and `mode` is a **subcircuit number** [V-JS + V-DATA] | yes (`explain`, `name`, `scientist`) |
-| `explain.not_this[]` | list[4] str | no | "What does not make it fire" | yes |
-| `explain.how_we_know[]` | list[5] of `{claim, test, result}` | no | "Agent experiments" | yes |
-| `explain.open` | str 214-363 | no | "Still open" | yes |
+| `explain.situations[]` | list 2-20 of `{mode:int, name, explain, typical, cue, scientist}` | no | per-mode paragraphs (`mode` = mode index) if the pole has several modes; if it has only one mode, `mode` is a **subcircuit number** instead [V-JS + V-DATA] | yes (`explain`, `name`, `scientist`) |
+| `explain.not_this[]` | list[4] str | no | negative cases | yes |
+| `explain.how_we_know[]` | list[5] of `{claim, test, result}` | no | experiments of the scientist agent | yes |
+| `explain.open` | str 214-363 | no | open questions | yes |
 | `explain.contexts{<k>}` | dict str->str (8-46 chars), may be `{}` | opt | short name per subcircuit number | no |
 | `explain._model`, `scientist_model` | str | no | `claude-opus-5-5` in samples | no |
 | `islands_view` | dict | no | a restatement of the SC file in "island" vocabulary: `verdict`, `split:false`, `source:"subcircuit_modes"`, `closed_gate_share` (= SC `closed_share`), `unit` (`mode` or `island`; `island` on the monosemantic sample) | no |
 | `islands_view.modes[]` | `{name, predicate, island_ids[int], kind:"mode"\|"residue", share, kl_ratio, ev}` | - | = SC modes (label, description, subcircuit numbers, share, kl.ratio) **without the closed-gate residue mode**; `ev` = list of `[a_rel, island_id]` for the non-closed examples | no |
 | `islands_view.islands[]` | `{id:int, n, name, description, examples[12]}` | may be `[]` | = SC subcircuits not in the closed-gate mode: `name` = `function_label`, `description` = `meaning`; examples `{si:null, pos:null, a, focal:16, tokens[33] str, act[33] float\|null, text, closed}` are the SC exemplars with the weakest four in reversed order; `text` = `pre + tokens` | no |
 | `mode_docs[]` | list 0-5 of `{unit:int, si:null, a, tokens[], act[], routed[]}` | may be `[]` | longer token windows (28-133 tokens) for a few modes / subcircuits | no |
-| `circuit.note` | str | `""` or e.g. "none of its firing examples passed the circuit analysis" | - | no |
+| `circuit.note` | str | `""` or a one-sentence note | - | no |
 | `circuit.inputs[]` | `{name, effect:"+"\|"-", role:"drives"\|"opposes", share}` | may be `[]` | = MoE `pole_view[pole].inputs` (`share` = `mass_share`) [V-DATA] | no |
 | `circuit.readers[]` | `{name, effect, n}` | may be `[]` | = MoE `pole_view[pole].readers` [V-DATA] | no |
 | `circuit.logits[]` | `{token, w}` 8-10 | no | the first (up to 10) MoE `logits` entries whose `sign` equals the pole sign, same order [V-DATA 3/3] | no |
@@ -344,21 +334,21 @@ Optional fields read by the JS but absent in all 6 samples: `has_kl`, `set` (`"r
 
 | Path | Type | Meaning |
 |---|---|---|
-| `schema`, `provenance.{built_at, wave, git_sha, moe_relp_sha256, active_threshold_def, configs{input_max_nodes, edge_max_nodes, fidelity_dev}}` | str/int | build metadata; `active_threshold_def` = "input: \|v\|>=5% of exemplar lane mass; readers: \|v\|>=5% of exemplar \|reader\| mass; logits: v!=0" |
+| `schema`, `provenance.{built_at, wave, git_sha, moe_relp_sha256, active_threshold_def, configs{input_max_nodes, edge_max_nodes, fidelity_dev}}` | str/int | build metadata; `active_threshold_def` = a text rule for when a route counts as active: input and reader routes need at least 5% of the exemplar's absolute mass in that lane, logit routes any non-zero value |
 | `identity.{did, layer, expert, neuron}` | - | identity |
 | `identity.labels.{short_title_pos, short_title_neg, fleet_label}` | str 199-265 / 491-497 | per-pole one-line readings; `fleet_label` = long autointerp label (= SC `label` for the pos pole sample) |
 | `identity.quantiles.{p0_01, p0_1, p90, p95, p99, p99_9, p99_99, top50}`, `identity.gmax` | float | raw-activation quantiles of the neuron over the corpus [I] |
 | `identity.jtable.{jnorm, kappa, dnorm, fp3_ids[3], fp3_tokens[3]}` | float / int / str | weight-derived scalars and 3 token ids/strings [I, undocumented] |
 | `theta_first.poles.{positive,negative}.{theta, theta_source, shoulder_lo, table_flag, pole_real, structural_gate{real, frac_routed_on_pole}, measured_gate{measured_sign_share, n_events, real, reasons[]}, n_candidates, n_admitted{core, shoulder, sub_theta_context}, frac_routed_below_theta}`, `theta_first.{applied, counts{input, gate_closed_dropped, admitted, dropped_sub_theta}, doc}` | - | exemplar-selection bookkeeping; `theta` is used by the page for "N x" strengths [V-JS] and is the **same number for both poles** in 3/3 samples |
-| `pole_view{"+","-"}.{n_admitted, theta, pole_real, drive_mass, oppose_mass, cancel_note, line, prior_read, top_contexts[6]{ctx, act, ex_id}}` | - | per-pole summary; `line` = one-line reading shown as title; `pole_real:false` -> "This pole of the neuron fires too rarely to have a circuit to show."; `drive_mass` = sum of `aligned_mass` of driving inputs [V-DATA]; `top_contexts[].ctx` marks the firing token with ▸...◂ |
+| `pole_view{"+","-"}.{n_admitted, theta, pole_real, drive_mass, oppose_mass, cancel_note, line, prior_read, top_contexts[6]{ctx, act, ex_id}}` | - | per-pole summary; `line` = one-line reading shown as title; `pole_real:false` -> the page shows a no-circuit message for that pole; `drive_mass` = sum of `aligned_mass` of driving inputs [V-DATA]; `top_contexts[].ctx` marks the firing token with ▸...◂ |
 | `pole_view.X.inputs[]` | `{id, name, n, color, effect, role, aligned_mass, lane_effect, mass_share, dominant_expert, dominant_share, mean_contrib}` | per-pole input-group summary (not used by the public page, which recomputes from `groups.input`) |
-| `pole_view.X.readers[]` | `{id, name, n, effect, color, n_ex, n_ex_other, mean_w}` | downstream groups for this pole; `n_ex` = examples in which the group is active ("N neurons activated in n_ex of n_admitted examples") [V-JS] |
+| `pole_view.X.readers[]` | `{id, name, n, effect, color, n_ex, n_ex_other, mean_w}` | downstream groups for this pole; `n_ex` = examples in which the group is active, shown against `n_admitted` [V-JS] |
 | `pole_view.{built_at, prior_titles{"+","-"}}` | str / str or null | earlier titles |
-| `groups.input[]` | `{id, name, description, family:"pos"\|"neg", effect, color, is_misc, kind:null, subgroups[], bucket, members[], agg}` | groups of earlier neurons; `bucket` = `"+\|drives"`, `"+\|opposes"`, `"-\|drives"`, `"-\|opposes"` (pole, role); names carry a lane tag after " · " that the page strips |
-| `groups.input[].agg.{gate,up}.{mean, n_active, mean_signed, n_pos, n_neg}` | float/int | `mean` = mean of the incidence column over all exemplars; `mean_signed` = sum of members' `gate_s`/`up_s` = the number printed on the card ("each group's summed contribution to that signal"); `n_pos`/`n_neg` = members raising / lowering [V-JS + V-DATA] |
+| `groups.input[]` | `{id, name, description, family:"pos"\|"neg", effect, color, is_misc, kind:null, subgroups[], bucket, members[], agg}` | upstream groups (members on earlier layers); `bucket` = `"+\|drives"`, `"+\|opposes"`, `"-\|drives"`, `"-\|opposes"` (pole, role); names carry a lane tag after " · " that the page strips |
+| `groups.input[].agg.{gate,up}.{mean, n_active, mean_signed, n_pos, n_neg}` | float/int | `mean` = mean of the incidence column over all exemplars; `mean_signed` = sum of members' `gate_s`/`up_s` = the number printed on the card; `n_pos`/`n_neg` = members raising / lowering [V-JS + V-DATA] |
 | `groups.input[].subgroups[]` | `{name, description, units[uid], level:1-4\|null, agree:0-1, lane{gate_share, gate_sign, up_sign, tag}}` | themes inside a group |
 | `groups.input[].members[]` | `{uid, did, pole, layer, label (<=100), label_full (<=500), label_source, sim:null, gate_w, up_w, gate_pct, up_pct, coupling_exact, q1_share, ev_n_active, ev_n_docs, cat, agree:"3/3", gate_s, up_s, relp}` | member neurons (earlier layers only); `gate_s`, `up_s` = the member's signed contribution to each lane shown in the member list [V-JS]; `gate_w`, `up_w` signed coupling values and `gate_pct`, `up_pct` percentiles [I]; `label_source` `fleet+`/`fleet-`/`short_title+`/`... (cross-pole)` |
-| `groups.readers[]` | `{id, name, description, effect, color, is_misc, kind, subgroups[], bucket:"+\|raised"..., hop_min:null, hop_max:null, causal:false, members[], agg{mean, n_active, mean_signed:0, n_pos:0, n_neg:0}}` | groups of later neurons |
+| `groups.readers[]` | `{id, name, description, effect, color, is_misc, kind, subgroups[], bucket:"+\|raised"..., hop_min:null, hop_max:null, causal:false, members[], agg{mean, n_active, mean_signed:0, n_pos:0, n_neg:0}}` | downstream groups (members on later layers) |
 | `groups.readers[].members[]` | `{uid, did, pole, layer, label, label_full, label_source, hop, sim:null, w, w_s:0, gate_pct, up_pct, r_gate, coupling_exact, q1_share, ev_n_active, ev_n_docs, cat, agree, weight_coupled}` | `hop` = layer distance to this neuron [V-DATA]; `w` signed effect [I] |
 | `logits[24]` | `{token, token_id, w, sign, source:"static"\|"target", n_active?}` | output-token effects; `static` = weight-derived top tokens of either sign, `target` = next tokens observed in exemplars (`n_active`) [I] |
 | `quadrant_evidence` | `{}` in all samples | - |
@@ -370,8 +360,8 @@ Optional fields read by the JS but absent in all 6 samples: `has_kl`, `set` (`"r
 |---|---|---|
 | `ex_id`, `band`, `regime` | str | band in `top1000, p99_99, p99_9` (positive firings) and `bottom1000, p0_01, p0_1` (negative firings); regime `gateopen` only |
 | `si`, `focal` | int | corpus sequence index and token position (the only place a corpus coordinate is published) |
-| `act` | float signed | raw activation; `act = silu(gate_pre) * up_pre` holds to 2.3e-4 for all 847 sample exemplars [V-DATA], matching the page text "its output is gate x up" |
-| `gate_pre`, `up_pre` | float | gate and up pre-activations: **2-D coordinates of each firing**; gate_pre 0.43-3.07 (all positive: gate-open regime), sign(up_pre) = sign(act) |
+| `act` | float signed | raw activation; `act = silu(gate_pre) * up_pre` holds to 2.3e-4 for all 847 sample exemplars [V-DATA] |
+| `gate_pre`, `up_pre` | float | gate-lane and up-lane pre-activations: **2-D coordinates of each firing**; gate_pre 0.43-3.07 (all positive: gate-open regime), sign(up_pre) = sign(act) |
 | `router_weight`, `route_rank` | float 0.007-0.63, int 0-7 | MoE router weight of this expert on the token and its rank among the 8 routed experts [I] |
 | `dup` | int 0 | duplicate marker |
 | `window.{tokens[], acts[], focal_rel}` | list <= 81, int (40) | +-40 tokens; `acts` raw signed activation, 0.0 (not null) where the expert was not routed (51-67% zeros) |
@@ -421,12 +411,12 @@ Verified equalities (6/6 poles unless stated): index `modes` = SC non-residue mo
 
 ### 3.2 Mode index consistency ("same index = same mode"?)
 
-- **Yes for open modes**: index k of `subcircuit_modes_index.poles[pid].modes` = k-th non-residue entry of SC `modes` = LS `modes[k]` = NS `islands_view.modes[k]` = the shell's `&mode=k` = NS `explain.situations[].mode` on multi-mode poles. The JS resolves it as `SC.modes.filter(x => x.subcircuits && !x.residue)[k]` [V-JS].
-- **SC has extra entries after the open modes**: residue modes (`residue:true`; up to 2 in samples: the closed-gate one and "Residue (unreadable)"). Their raw array index continues after the open modes.
-- **LS has different extra entries**: indices after the open modes are Q3/Q4 modes (0-18 in samples), and the last index is "unassigned". These indices have **no counterpart index** in SC or NS. Each LS mode (open or closed) is a set of whole subcircuits: every subcircuit maps to exactly one LS mode, and the mode share equals the sum of its subcircuits' shares [V-DATA]; LS Q3/Q4 modes regroup the subcircuits of SC's "Closed-gate firings (silu leak)" residue; "unassigned" collects the rest of that residue plus "Residue (unreadable)" subcircuits and firings with `s = -1`. The page says a Q3/Q4 mode selected in the landscape opens "All" in the Modes tab.
+- **Yes for open modes**: index k of `subcircuit_modes_index.poles[pid].modes` = k-th non-residue entry of SC `modes` = LS `modes[k]` = NS `islands_view.modes[k]` = the shell's `&mode=k` = NS `explain.situations[].mode` on multi-mode poles. The JS resolves k as the k-th SC mode that has a `subcircuits` key (an empty list counts) and is not `residue` [V-JS].
+- **SC has extra entries after the open modes**: residue modes (`residue:true`; up to 2 in samples: the closed-gate one and an unreadable one). Their raw array index continues after the open modes.
+- **LS has different extra entries**: indices after the open modes are Q3/Q4 modes (0-18 in samples), and the last index is "unassigned". These indices have **no counterpart index** in SC or NS. Each LS mode (open or closed) is a set of whole subcircuits: every subcircuit maps to exactly one LS mode, and the mode share equals the sum of its subcircuits' shares [V-DATA]; LS Q3/Q4 modes regroup the subcircuits of SC's closed-gate residue mode; "unassigned" collects the rest of that residue plus the subcircuits of the unreadable residue and firings with `s = -1`. In the Modes tab a `mode` index >= the number of open modes falls back to "All" [V-JS].
 - **NS drops the closed-gate residue mode** and its subcircuits from `islands_view` (1, 5, 20 and 38 subcircuits missing in the four samples that have such a mode; in the last case `islands_view.islands` is empty).
 - **Single-mode poles**: `explain.situations[].mode` and `mode_docs[].unit` are subcircuit numbers, not mode indices (sample `L4_E1_N177__neg`: situations modes `[7,8,1,2,3,4]` = `explain.contexts` keys; `islands_view.unit = "island"`).
-- **Failed-read edge case** (`L4_E1_N345__neg`, closed share 0.992): SC has 3 non-residue modes with `share:0`, `subcircuits:[]`, `kl:null` (summary: "No subcircuit readings were provided, so this merge rests only on the autointerp label"); the index lists them (n_modes 3); LS has 0 open modes and 18 Q3/Q4 modes, so LS index k does not correspond to SC mode k there. Rule that fits all samples: LS open modes = SC non-residue modes that have at least one subcircuit.
+- **Failed-read edge case** (`L4_E1_N345__neg`, closed share 0.992): SC has 3 non-residue modes with `share:0`, `subcircuits:[]`, `kl:null`; the index lists them (n_modes 3); LS has 0 open modes and 18 Q3/Q4 modes, so LS index k does not correspond to SC mode k there. Rule that fits all samples: LS open modes = SC non-residue modes with a non-empty `subcircuits` list.
 - **IS modes are a different, older reading**: `opus.modes` (1-3 per pole, shares as text) and island ids have no index relation to subcircuit modes or subcircuit ids. Example: `L30_E47_N449__pos` has 1 island mode (74.2%) + unassigned versus 7 open subcircuit modes + 4 Q3/Q4 modes.
 
 ### 3.3 Are example ids shared across files?
@@ -543,9 +533,9 @@ Practical consequences: NS adds ~15 kB of unique text per pole if SC is already 
 | 31 | LS | `dots[].{a, kl, lk, w, b, m, s, c}` | ~1,000 per pole | float/int/bool | a 0.04-22.9; kl 0-0.14; lk -10.9 .. -0.85 | **per-firing point cloud**: strength x damage x mode x subcircuit x gate sign, with population weights |
 | 32 | LS | `dots[].t[][1]` | <= 113 per dot (values on the last ~29) | float or null | -22.3-22.8 | activation profile around each firing |
 | 33 | LS | `bands[].{mass, n, a_min, a_med, a_max}` | 5 | float/int | - | rarity ladder (token-frequency scale) |
-| 34 | LS | `bands[].counts[k]`, `bands[].dmg_lin[k]`, `bands[].dmg[k]` | 5 x K | int / float | counts 0-1,000; dmg_lin 0-2.64; dmg 0-213 | **band x mode matrices**: how mode composition and damage change with firing strength |
+| 34 | LS | `bands[].counts[k]`, `bands[].dmg_lin[k]`, `bands[].dmg[k]` | 5 x K | int / float | counts 0-1,000; dmg_lin 0-2.64; dmg 0-213 | **band x mode matrices**: mode composition and damage per band |
 | 35 | LS | `sim` | (K-1) x (K-1) or null | float | 0.011-1 | mode-mode similarity (basis undocumented) |
-| 36 | LS | `rel_sim` | (K-1) x (K-1) | float | 0.40-1 | **mode-mode relatedness from topic embeddings of the mode descriptions** - the only embedding-derived geometry in the release |
+| 36 | LS | `rel_sim` | (K-1) x (K-1) | float | 0.40-1 | **mode-mode similarity of description embeddings** - the only embedding-derived geometry in the release |
 | 37 | LS | `order`, `rel_order`, `rel_col` | K-1 | int perm, hex colour | - | 1-D seriation of modes and a colour embedding of relatedness |
 | 38 | LS | `modes[].{share, kl_per_firing, fold}`, `kl_fit.{slope, r2, n, q}` | K / scalars | float/int | slope 1.76-3.10, r2 0.16-0.69 | damage scaling exponent per pole |
 | 39 | NS | `islands_view.modes[].ev` | list of `[a_rel, subcircuit number]` | float, int | 0-23.3 | strengths of non-closed exemplars per mode |
@@ -598,7 +588,7 @@ All analysis text (labels, descriptions, readings, reports) is **English**; 6,09
 
 ## 7. Text corpus statistics from the global indices
 
-`subcircuit_modes_index.json` mode labels: 22,620 labels over 5,477 poles (5,426 poles with at least one), 22,619 distinct (one duplicate: "Wikipedia 'List of minor planets' wikitable rows"), 1,879,764 characters, length min 10 / median 76 / mean 83.1 / p90 132 / max 384. 10,855 labels contain quoted examples, 15,155 contain parentheses. Latin-word tokens after stop-word removal: 193,354; vocabulary 42,571.
+`subcircuit_modes_index.json` mode labels: 22,620 labels over 5,477 poles (5,426 poles with at least one), 22,619 distinct (one label occurs twice), 1,879,764 characters, length min 10 / median 76 / mean 83.1 / p90 132 / max 384. 10,855 labels contain quoted examples, 15,155 contain parentheses. Latin-word tokens after stop-word removal: 193,354; vocabulary 42,571.
 
 Most frequent words (lower-cased, count): names 1845, chinese 1374, code 1094, name 803, lists 707, math 675, text 668, patent 540, words 524, word 519, opening 497, titles 456, prose 441, legal 437, terms 432, spam 383, named 380, nouns 371, digits 353, numbers 346, citations 339, closing 335, next 327, slot 316, java 308, noun 306, data 296, surname 296, us 286, place 277, inside 277, repeated 277, japanese 271, pages 270, phrases 267, seo 261, lines 261, headers 254, russian 251, german 249, onset 248, reference 247, set 243, wikipedia 235, forum 234, stock 234, head 228, line 224, slots 222, title 222, value 219, verb 216, given 215, time 213, field 212, object 210, citation 209, compounds 208, year 208, subject 205, source 204, number 203, product 202, section 202, date 201, end 201, class 201, clauses 200, surnames 199, category 198, list 193, software 192, tables 188, french 186, web 184, digit 184, page 183, identifiers 183, values 182, clause 181, numeric 181, labels 180, state 180, verbs 176, court 175, brand 173, hex 173, table 172, years 171, author 170, physics 169.
 
@@ -616,28 +606,18 @@ Shell `explorer.html` (its inline script is identical to `shell.js`): left rail 
 
 | Tab (key) | Iframe | Data |
 |---|---|---|
-| Overview (1) | `neuron_overview-mobile-v3.html?shell=1&did=&pole=&mode=` (embeds `neuron_landscape-mobile-v3.html?shell=1&bare=1`) | NS + LS + SC (+ optional ctx) + headline_overrides; disabled when the pid is not in `atlas_index.json` ("No overview for this pole yet") |
-| Modes (2) | `subcircuit_modes_view-mobile-v2.html?shell=1&public=1&pole={pid}&data=subcircuit_modes_data` when the pole has a subcircuit read; otherwise `public_islands_atlas-mobile-v2.html?shell=1&pole={pid}&data=public_atlas_data/islands`; otherwise the message "No modes for the positive/negative pole of this neuron." | SC or IS |
-| Circuit (3) | `public_circuit_explorer-mobile-v1.html?shell=1&did=&pole=` | MoE bundle; on 404: "No circuit is available for this neuron yet." |
+| Overview (1) | `neuron_overview-mobile-v3.html?shell=1&did=&pole=&mode=` (embeds `neuron_landscape-mobile-v3.html?shell=1&bare=1`) | NS + LS + SC (+ optional ctx) + headline_overrides; disabled when the pid is not in `atlas_index.json` |
+| Modes (2) | `subcircuit_modes_view-mobile-v2.html?shell=1&public=1&pole={pid}&data=subcircuit_modes_data` when the pole has a subcircuit read; otherwise `public_islands_atlas-mobile-v2.html?shell=1&pole={pid}&data=public_atlas_data/islands`; otherwise a no-modes message | SC or IS |
+| Circuit (3) | `public_circuit_explorer-mobile-v1.html?shell=1&did=&pole=` | MoE bundle; on 404 a no-circuit message |
 
-Definitions quoted from the pages (verbatim):
-- Landing: "This atlas shows 3,000 randomly selected neuron poles from the expert layers of Qwen3.6-35B-A3B, with examples of text that cause them to fire." / "A neuron's output can be positive or negative, and the two signs often respond to different things, so each neuron has a positive pole and a negative pole, read separately." / "For each pole, we split the firing examples into **subcircuits**: groups of examples where the same earlier parts of the model make the neuron fire. An LLM judge then grouped subcircuits that respond to similar concepts in the text into **modes**. A pole with one mode does one specific thing; a pole with several modes responds to unrelated concepts."
-- Islands page: "For one pole, we take its strongest firing examples from a large text corpus and cluster them into **islands**: groups of examples that occur in similar contexts. An LLM judge then grouped islands that respond to similar concepts in the text into **modes**, and named and described each mode. Islands that fit no mode are shown as **unassigned examples**."
-- Subcircuit page (research wording): "A **pole** is one sign of a neuron's output, read on its own. θ is the pole's firing threshold, and activations here are given in units of θ. The pole's firings are split into **subcircuits**: clusters of firings that share the same upstream circuit evidence." / "Opus read each subcircuit from text alone (its **meaning** and **token pattern**), then merged subcircuits with the same meaning into **modes**, setting unreadable ones aside as **residue**. Separately, it wrote each subcircuit's **function** from contrastive circuit evidence: the units that drive or oppose the gate and up lanes, and the readers downstream." / "Each subcircuit carries 12 exemplars: its 4 strongest firings, 4 around its median, and its 4 weakest, each from a distinct context. Two firings share a context when the 16 tokens up to the firing token are identical ... **fit** exemplars come from the discovery fold; **held-out** ones come from the audit fold. **closed gate** marks a firing whose gate pre-activation was negative."
-- Subcircuit page (public wording): "**Damage per firing** compares how much the model's next-word prediction changes when the neuron is switched off on that mode's firings with the side's average firing." / "**Q3/Q4** firings are ones where the neuron's gate input was negative, so it fired only through a weak leak. **Unassigned examples** fit no mode."
-- Evidence table: "**leaf** is the unit's mean contribution over this subcircuit's firings; **rest** is its mean over the pole's other firings. Lane inputs are the excess over the expert's typical neuron."
-- Landscape caption: "**Height** is how strong and rare a firing is, from the top 5% of tokens at the bottom to the 1,000 strongest in about a billion tokens at the top; the number on the left is the typical strength there, as a multiple of the firing threshold. Firings were sampled at these five levels; the shape between them is interpolated. **Width** by default is the average damage one firing at that height does: how much the model's next-word prediction changes when the neuron is switched off there." / "About 200 firings per pole were tested directly; damage for the rest is estimated from their strength and mode." / key: "how much the next-word prediction changes (KL, summed over 16 tokens) when the neuron is zeroed at the firing token".
-- Overview glossary: "Strength is the neuron's activation in multiples of this pole's firing threshold. Damage is how much the model's next-word prediction changes (KL divergence over the next 16 tokens) when the neuron is zeroed at the firing token ... Shares are of this pole's firings above the top-5% cutoff, weighted to how often they occur in real text ... A *negative pole* is the neuron's output with the opposite sign, read on its own; its strengths are shown as positive multiples. In mode names, a highlighted span marks the firing token and | a token boundary."
-- Circuit page: "The neuron computes two signals and multiplies them: its output is **gate × up**. Groups of earlier neurons feed each signal; every group shows a signed number for the gate and one for up (orange positive, slate negative), and the two can differ in sign." / "The gate decides whether the neuron switches on." / "The up signal sets how strongly, and with which sign, the neuron fires once the gate is open." / "On the negative pole the gate is usually open and the up signal is negative, so groups that **lower up** are the ones pushing it to fire."
-
-Token shading recipes differ per view: IS scales by the island's maximum absolute value (own-pole colour, opposite sign in the other colour); SC uses a fixed 0-3 theta ramp; LS/Overview shade relative to the example's own firing token (`alpha = 0.85 * (|v|/peak)^0.7`, nothing below 6%); MoE scales by the window maximum. Pole colours: positive `rgb(224,86,27)`, negative `rgb(51,105,138)`.
+Token shading recipes differ per view: IS scales by the island's maximum absolute value (two colours, chosen by the value's sign); SC uses a fixed 0-3 theta ramp; LS/Overview normalise by the example's focal-token value (opacity 0.85·r^0.7 with r = min(1, |v|/|v_focal|), 0 for r < 0.06, at most 0.45 for the opposite sign); MoE scales by the window maximum. Pole colours: positive `rgb(224,86,27)`, negative `rgb(51,105,138)`.
 
 ---
 
 ## 9. User controls and URL parameters
 
 Shell (`explorer.html`):
-- Search box `#q` (shortcut `/`): case-insensitive AND over whitespace-separated terms against `did + "L9/E196/N344" form + did with spaces + "positive"/"negative" + description` (description = subcircuit mode labels joined by " · ", else island desc). Substring match only; no stemming. Enter opens the first hit. The query itself is not written to the URL.
+- Search box `#q` (shortcut `/`): case-insensitive AND over whitespace-separated terms; haystack = did, display id (`L9/E196/N344`), did with spaces, `positive`/`negative`, description (subcircuit mode labels joined by " · ", else island desc). Substring match only; no stemming. Enter opens the first hit. The query itself is not written to the URL.
 - Kind filter `#fCat` (URL `cat=`): All neurons / Single mode (`mono`) / One dominant mode (`fn`) / Multiple modes (`poly`) / Uninterpretable (`dark`).
 - Layer filter `#fL` (URL `l=`): All layers (`""`) / "Layers 9-36" (`middle`, default; hides layers 4 and 39) / one layer.
 - Sort `#fSort` (URL `sort=`, default `random` omitted): `sim-desc`, `sim-asc` (simulatability), `layer-asc`, `layer-desc`, `modes-desc`, `modes-asc`, `random` (fixed seeded order). Poles without a value sort last.
@@ -645,11 +625,11 @@ Shell (`explorer.html`):
 - Keys: `/` search, `j`/`k` next/previous pole, `r` random pole, `1`/`2`/`3` tabs, `?` help, `Esc`. Buttons: Random, copy link, show/hide list, Clear filters. List rows render in batches of 150.
 - postMessage protocol between shell and tabs: `shell-load {did, pole, mode}`, `shell-pole`, `shell-mode`, `shell-key`; tabs report `landscape-mode`, `overview-mode`, `modes-mode`, `landscape-width`, `landscape-size`.
 
-Landscape page: `shell=1`, `did`, `pole`, `mode`, `data` (data dir, default `neuron_landscape_data`), `bare=1`, `embed=1`, `h` (drawing height, default 420), `rel=off` (fixed palette), `pid`, `set` (standalone). Controls: Height = "Firing strength" | "Damage"; Width = "Damage per firing" | "Frequency" | "Total damage"; click a lane/dot/legend row to select a mode; hover a dot for its text. Standalone only: search, layer select, unit-set select.
+Landscape page: `shell=1`, `did`, `pole`, `mode`, `data` (data dir, default `neuron_landscape_data`), `bare=1`, `embed=1`, `h` (drawing height, default 420), `rel=off` (fixed palette), `pid`, `set` (standalone). Controls: Height = "Firing strength" | "Damage"; Width = "Damage per firing" | "Frequency" | "Total damage"; mode selection by click on a lane, dot or legend row; dot text on hover. Standalone only: search, layer select, unit-set select.
 
-Overview page: `shell=1`, `did`, `pole`, `mode`, `pid`, `open=none|dmg`, `rel=off`. Controls: mode picker (ordered and faded by the landscape's width quantity), example rows expand to full context, "show 8 more", arrow keys step modes, Enter expands, Esc clears.
+Overview page: `shell=1`, `did`, `pole`, `mode`, `pid`, `open=none|dmg`, `rel=off`. Controls: mode picker (modes sorted and dimmed by the Width quantity of the landscape), click on an example row = longer context, "show 8 more", keys `↑`/`↓` previous/next mode, `Enter` opens example rows one at a time, `Esc` deselects.
 
-Subcircuit page: `shell=1`, `public=1` (hides research fields), `pole={pid}`, `mode=k`, `data=`; hash `#L4-E1-N212-pos[-all|-mN]`. Controls: mode list / share strip, subcircuit filter box (searches id, function_label, meaning, token_pattern, function, gate_role, up_role, circuit unit ids and exemplar text), Collapse/Expand all, "8 more examples, typical and weakest", "Circuit evidence" tables. The standalone rail filters (layer, pole, class, mode count, search) exist but the embedded list `IDX` is empty in this release.
+Subcircuit page: `shell=1`, `public=1` (public mode, see [`subcircuit.md`](subcircuit.md) 4.6), `pole={pid}`, `mode=k`, `data=`; hash `#L4-E1-N212-pos[-all|-mN]`. Controls: mode list / share strip, subcircuit filter box (searches id, function_label, meaning, token_pattern, function, gate_role, up_role, circuit unit ids and exemplar text), Collapse/Expand all, a button revealing the other 8 exemplars, "Circuit evidence" tables. The standalone rail filters (layer, pole, class, mode count, search) exist but the embedded list `IDX` is empty in this release.
 
 Islands page: `shell=1` / `embed=1`, `pole=` or `pid=` or `#pid`, `data=`. Standalone controls: search (pid or name substring), layer, pole, sort by layer / random, Random pole; list capped at 600 rows. Per pole: island map bars, mode cards, island accordions, "Show full passage · N tokens".
 
@@ -673,7 +653,7 @@ Tier 7 (outside neurons): SC `circuit.*[].label`, MoE `members[].label_full` key
 
 1. Mode geometry inside a pole: LS `rel_sim` (and `sim`) are ready-made K x K similarity matrices; `rel_order` is a seriation; `rel_col` a colour embedding. MDS or clustering on `rel_sim` gives a per-pole map of meanings.
 2. Firing point clouds: LS dots give (strength a, log damage lk, band, mode, subcircuit, gate sign, weight w) for ~1,000 firings; MoE exemplars give (gate_pre, up_pre) per firing with exact `act = silu(gate)*up`. LS has the closed-gate flag but no gate/up coordinates; MoE has coordinates but only gate-open firings.
-3. Strength x mode composition: LS `bands[].counts` and `dmg_lin` (5 x K) show how the mixture of meanings shifts from the top 5% to the strongest 1,000 firings; population weights are `mass/n`.
+3. Strength x mode composition: LS `bands[].counts` and `dmg_lin` (5 x K) show how the mixture of meanings changes across the five bands (`p95` to `top 1,000`); population weights are `mass/n`.
 4. Bipartite graphs: subcircuit x upstream unit (SC, weights leaf/rest per lane), neuron-pole x input group x member (MoE, gate and up weights), neuron-pole x reader (MoE). Shared outside units link atlas poles (strongest within the same expert).
 5. Incidence matrices: MoE `routes` (exemplar x route) allow re-clustering of firings by upstream evidence and comparison with the published groups.
 6. Cross-pole text geometry: nothing is published, so embed tier-1/2 text yourself; `L`, `E`, `N`, verdict, n_modes, sim, kl ratios are covariates.
