@@ -77,6 +77,16 @@ notebook.restore("/content/drive/MyDrive/neuron-atlas/neuron-atlas-<version>.tar
   „In Colab öffnen“-Link öffnet Colab dann nach einer einmaligen GitHub-Freigabe („private
   Repositories einbeziehen“). Bei einem öffentlichen Repository ist beides nicht nötig.
 
+## Attention-Versuche vorbereiten
+
+Für einen eigenständigen Vergleich mit Qwen3.6-35B-A3B gibt es eine
+[CPU-Vorbereitung in Colab](https://colab.research.google.com/github/Erikiss/Interface-Neuron-Atlas-by-GoodFire-AI/blob/codex/attention-atlas-preparation/notebooks/attention_prepare.ipynb).
+Sie prüft gepinnte Modellmetadaten, schätzt den Gewichtsspeicher und übernimmt
+ausgewählte Pole aus vorhandenen Interface-Exporten in ein Versuchsmanifest.
+Sie startet keinen Modelllauf und braucht kein Drive. Ablauf, Kontrollen und
+die getrennte Referenz auf die bisherigen 286 Qwen3-1.7B-Neuronen stehen im
+[Versuchsplan](docs/attention_experiments.md).
+
 ## Begriffe in Kürze
 
 - **Neuron**: `L30_E47_N449` = Layer 30 / Expert 47 / Neuron 449 (angezeigt als `L30/E47/N449`).
