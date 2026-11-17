@@ -1,13 +1,17 @@
 # Attention-Eingriffe und Atlas-Vergleich vorbereiten
 
 Diese Erweiterung bereitet einen eigenen Versuch zur Reaktion auf gezielte
-Attention-Änderungen vor. Sie lädt keine Modellgewichte und führt keine Inferenz
-aus. Der Hauptversuch bleibt auf Qwen3-1.7B mit den bisherigen 286 H_tq-Neuronen.
+Attention-Änderungen vor. Die Metadatenvorbereitung lädt keine Modellgewichte und
+führt keine Inferenz aus. Der Hauptversuch bleibt auf Qwen3-1.7B mit den bisherigen 286 H_tq-Neuronen.
 Qwen3.6-35B-A3B bildet einen eigenständigen Vergleich mit Atlas-Koordinaten.
 
 [CPU-Vorbereitung in Colab öffnen](https://colab.research.google.com/github/Erikiss/Interface-Neuron-Atlas-by-GoodFire-AI/blob/codex/attention-atlas-preparation/notebooks/attention_prepare.ipynb).
 Das Notebook braucht weder GPU noch Google Drive. Es erzeugt ein kleines ZIP mit
 Modellmetadaten, Speicherabschätzung und Versuchsmanifest. Es startet keinen Versuch.
+Danach stehen eine [deterministische Auswahl und optionale Laufzeitadapter](attention_runtime.md)
+sowie ein [Pilotprotokoll](attention_pilot_protocol.md) bereit. Die Adaptertests
+verwenden kleine, zufällig initialisierte Modelle; sie sind keine Ergebnisse
+auf dem veröffentlichten Qwen-Checkpoint.
 
 ## Was aus Bernies Repository übernommen wird
 

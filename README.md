@@ -87,6 +87,12 @@ Sie startet keinen Modelllauf und braucht kein Drive. Ablauf, Kontrollen und
 die getrennte Referenz auf die bisherigen 286 Qwen3-1.7B-Neuronen stehen im
 [Versuchsplan](docs/attention_experiments.md).
 
+Die anschließende [Auswahl und Adapterprüfung](docs/attention_runtime.md) friert
+Ziel- und Kontrollneuronen aus lokalen Katalogen ein und prüft Attention-Eingriffe
+sowie geroutete und gemeinsame MLP-Aktivierungen auf kleinen Testmodellen.
+Das [Pilotprotokoll](docs/attention_pilot_protocol.md) trennt diese technischen
+Tests vom späteren Lauf auf den veröffentlichten Gewichten.
+
 ## Begriffe in Kürze
 
 - **Neuron**: `L30_E47_N449` = Layer 30 / Expert 47 / Neuron 449 (angezeigt als `L30/E47/N449`).
