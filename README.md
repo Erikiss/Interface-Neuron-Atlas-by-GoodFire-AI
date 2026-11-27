@@ -338,12 +338,11 @@ Anfragen mit 429 und `Retry-After` gebremst.
   schriftliche Zustimmung unter anderem den automatisierten Zugriff sowie das Vervielfältigen,
   Speichern und Weiterverbreiten der Inhalte. Ob und wie weit das deine Nutzung betrifft, musst
   du selbst beurteilen – das hier ist keine Rechtsberatung.
-- **Projekte des Repository-Eigentümers:** Alle seine Repositories dürfen dieses Interface in
-  vollständiger Form nutzen (Entscheidung des Eigentümers vom 27.11.2026). Die Abwägung zu den
-  Nutzungsbedingungen hat er für seine Projekte damit getroffen; Sitzungen und Agenten, die in
-  diesen Repositories arbeiten, brauchen dafür keine weitere Freigabe. An den Voreinstellungen
-  ändert das nichts: Anfragen bleiben gedrosselt, jede Datei wird höchstens einmal geholt, und
-  Atlas-Daten gehören weiterhin in kein Repository.
+- **Repositories von Erikiss:** Sie alle dürfen dieses Interface in vollständiger Form nutzen
+  (Entscheidung vom 27.11.2026). Die Abwägung zu den Nutzungsbedingungen ist für diese Projekte
+  damit getroffen; Sitzungen und Agenten, die dort arbeiten, brauchen dafür keine weitere
+  Freigabe. An den Voreinstellungen ändert das nichts: Anfragen bleiben gedrosselt, jede Datei
+  wird höchstens einmal geholt, und Atlas-Daten gehören weiterhin in kein Repository.
 - Praktische Konsequenzen, an denen sich die Voreinstellungen orientieren:
   - Standardmäßig wird nur geladen, was du tatsächlich öffnest; alles wird lokal
     zwischengespeichert, Anfragen sind gedrosselt, und jede Datei wird höchstens einmal geholt.
