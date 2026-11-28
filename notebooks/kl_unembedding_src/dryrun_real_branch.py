@@ -47,7 +47,7 @@ NB_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "kl_unembeddi
 nb = json.load(open(NB_PATH, encoding="utf-8"))
 cells = ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
 ns = {"__name__": "__notebook__"}
-want = ["# ---------- Konfiguration", "# ---------- Bibliothek", "# ---------- Modell laden"]
+want = ["# ---------- Konfiguration", "# ---------- Ablage", "# ---------- Bibliothek", "# ---------- Modell laden"]
 for w in want:
     src = next(s for s in cells if w in s)
     try:
@@ -68,6 +68,8 @@ wm = json.load(open(IDX, encoding="utf-8"))["weight_map"]
 assert sorted({wm[n] for n in names}) == files, "Dateiliste passt nicht zu den benötigten Gewichten"
 print("Dateiliste deckt alle", len(names), "benötigten Gewichte ab: ja")
 print("Bereiche: DEV-Variable noch nicht gesetzt (vor dem Download): ", "DEV" not in ns)
+assert ns["OUT_DIR"] == ".", "Ohne Colab muss die Ablage auf die Laufzeit zurückfallen"
+print("Ablage ohne Colab: Laufzeit-Ordner (Rückfall) ja")
 
 # Zweiter Teil: Die Modellzelle wird erneut ausgeführt, während schon ein Modell geladen ist. Es darf nicht
 # noch einmal geladen werden (kein Download-Aufruf), und eine andere Aufteilung muss abgelehnt werden.

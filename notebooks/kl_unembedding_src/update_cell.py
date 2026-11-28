@@ -13,6 +13,7 @@ for blk in text_model(model).layers[STREAM.split:]:      # Hooks der alten Fassu
     blk.mlp._forward_hooks.clear()
     blk.mlp._forward_pre_hooks.clear()
     blk.mlp.gate._forward_hooks.clear()
+exec(new_cell("# ---------- Ablage"), globals())          # Zwischenstände in Google Drive
 exec(new_cell("# ---------- Bibliothek"), globals())
 exec(new_cell("# ---------- Modell laden"), globals())    # übernimmt das geladene Modell
 for marker in ("# ---------- Zielwörter", "# ---------- Gate 0", "# ---------- Teil 1", "# ---------- Satzpaare",

@@ -375,6 +375,29 @@ def family_max_null(W_U, gain, Wd, rows_list):
     return best, arg
 
 
+def save_json(path, obj):
+    """Schreibt JSON so, dass ein Abbruch keine halbe Datei hinterlässt (erst Hilfsdatei, dann umbenennen)."""
+    import json
+    import os
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def load_json(path):
+    """Liest eine JSON-Datei; None, wenn sie fehlt oder nicht lesbar ist."""
+    import json
+    import os
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
 def percentile_rank(values, x):
     """Anteil der Werte in values, die kleiner oder gleich x sind (0..1)."""
     v = torch.as_tensor(values).float().flatten()
@@ -723,9 +746,10 @@ class LayerStreamer:
         def stop(mod, args):
             raise _StopAfterSplit()
 
-        hook = self.text.layers[self.split].register_forward_pre_hook(stop)
-        self._modes("capture", "embed")
+        hook = None
         try:
+            hook = self.text.layers[self.split].register_forward_pre_hook(stop)
+            self._modes("capture", "embed")
             self.text(input_ids=ids, use_cache=False)
         except _StopAfterSplit:
             pass
@@ -733,7 +757,8 @@ class LayerStreamer:
             traceback.clear_frames(ex.__traceback__)
             raise
         finally:
-            hook.remove()
+            if hook is not None:
+                hook.remove()
             self._modes("pass", "inject")
             rec, self._rec = self._rec, None
         if rec["h"] is None or sorted(rec["kw"]) != list(range(self.split)):
@@ -756,9 +781,10 @@ class LayerStreamer:
             raise _StopAfterSplit()
 
         ids = self._padded(keys)
-        hook = self.text.layers[self.split].register_forward_pre_hook(grab)
-        self._modes("stream", "embed")
+        hook = None
         try:
+            hook = self.text.layers[self.split].register_forward_pre_hook(grab)
+            self._modes("stream", "embed")
             self.text(input_ids=ids, use_cache=False)
         except _StopAfterSplit:
             pass
@@ -766,7 +792,8 @@ class LayerStreamer:
             traceback.clear_frames(ex.__traceback__)    # die Fehlermeldung soll keine geladene Schicht festhalten
             raise
         finally:
-            hook.remove()
+            if hook is not None:
+                hook.remove()
             self._modes("pass", "inject")
         H = got["h"]
         for r, k in enumerate(keys):

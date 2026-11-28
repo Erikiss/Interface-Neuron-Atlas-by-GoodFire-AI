@@ -53,6 +53,7 @@ md(r"""
 - Teil 1 braucht das Modell nicht: Mit `P1_FROM_FILES = True` werden nur die nötigen Tensoren (rund 3 GB) geladen; Teile 0, 2 und 3 entfallen dann.
 - Teile 0 bis 3 laufen mit schichtweisem Laden auf einer GPU mit mindestens 40 GB (eine A100 mit 40 GB genügt). Die Schichten ab 21 bleiben dauerhaft auf der GPU (rund 32 GiB). Für die Vorberechnung wird jede untere Schicht je Aufruf einmal geladen und rechnet alle Texte. Der Download braucht rund 72 GB Festplattenplatz; das Notebook prüft das vorab.
 - Laufzeit nicht gemessen. Schätzung: 2 bis 4 Stunden (rund 5.000 Modellläufe für Teil 2); ein Probelauf (`SMOKE = True`) etwa 15 bis 30 Minuten.
+- Zwischenstände und Ergebnisse werden in Google Drive gesichert (Ordner `MyDrive/kl_unembedding`, Colab fragt einmal nach der Freigabe). Bricht eine Sitzung ab, macht eine frische Sitzung mit „Alle ausführen“ dort weiter: Kontroll-Neuronen und fertige Läufe kommen aus Drive; nur Download, Laden und Gate 0 laufen neu.
 - Atlas-Dateien werden über das Interface-Paket mit der Standardrate geholt (4 Anfragen pro Sekunde). Nichts davon wird gespeichert oder weitergegeben.
 """)
 
@@ -87,6 +88,8 @@ GATE0B = True                            # nachträglich (28.11.2026): Gate 0b e
 GATE0B_R, GATE0B_SLOPE, GATE0B_ROUTE = 0.99, (0.95, 1.05), 0.98   # Gate 0b, nur Fenster ab Textanfang
 SEED = 20261127
 STOP_IF_CALIBRATION_FAILS = True
+SAVE_TO_DRIVE = True                     # Zwischenstände und Ergebnisse in Google Drive sichern (nur in Colab)
+DRIVE_DIR = "/content/drive/MyDrive/kl_unembedding"
 FAM_KL = [" divergence", " KL", "KL"]                        # einteilige Zielwörter
 FAM_CTL = [" distance", " error", " norm", " Distance"]     # Kontrollwörter
 random.seed(SEED)
@@ -94,6 +97,23 @@ torch.manual_seed(SEED)
 if SMOKE:
     N_MATCH = 2
 print("Konfiguration:", dict(MODEL_ID=MODEL_ID, TEST_MODE=TEST_MODE, SMOKE=SMOKE, P1_FROM_FILES=P1_FROM_FILES, CANDIDATES=CANDIDATES))
+''')
+
+code(r'''
+# ---------- Ablage: Zwischenstände und Ergebnisse in Google Drive sichern ----------
+import os
+OUT_DIR = "."
+if globals().get("SAVE_TO_DRIVE", True) and not TEST_MODE:
+    try:
+        from google.colab import drive
+        drive.mount("/content/drive")
+        OUT_DIR = globals().get("DRIVE_DIR", "/content/drive/MyDrive/kl_unembedding")
+        os.makedirs(OUT_DIR, exist_ok=True)
+    except Exception as ex:
+        OUT_DIR = "."
+        print(f"Google Drive nicht verfügbar ({type(ex).__name__}): Zwischenstände bleiben nur in dieser Laufzeit.")
+print("Ablage für Zwischenstände und Ergebnisse:", os.path.abspath(OUT_DIR))
+print("Schon vorhanden:", sorted(f for f in os.listdir(OUT_DIR) if f.startswith("kl_unembedding")) or "nichts")
 ''')
 
 code("# ---------- Bibliothek (getestet an einem winzigen Modell derselben Architektur) ----------\n" + LIB)
@@ -129,6 +149,10 @@ else:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            left = torch.cuda.memory_allocated() / 2**30
+            if left > 1.0:
+                raise RuntimeError(f"Auf der GPU liegen noch {left:.1f} GiB, vermutlich von einem abgebrochenen Laden. "
+                                   "Bitte die Laufzeit neu starten (Laufzeit > Sitzung neu starten) und die Zellen erneut ausführen.")
         from transformers import AutoConfig
         assert torch.cuda.is_available(), "Keine GPU gefunden: in Colab unter Laufzeit eine GPU (A100) wählen."
         gb = torch.cuda.get_device_properties(0).total_memory / 1e9
@@ -188,7 +212,7 @@ print("Kontroll-Zielwörter:", [tok.decode([i]) for i in FAM_CTL_IDS])
 md(r"""
 ## Teil 0: Kalibrierung gegen den Atlas
 
-Der Atlas speichert für jede Feuerung ein Token-Fenster. Die Werte im Fenster sind die Aktivierung **in Vielfachen von θ**, auf zwei Nachkommastellen gerundet. Positionen vor `u` sind nur Kontext ohne Wert; `null` bedeutet, dass der Router den Experten dort nicht gewählt hat. Der Feuer-Token (Position `f`) hat einen Wert, der nicht die Feuerung selbst ist, und wird deshalb ausgelassen.
+Der Atlas speichert für jede Feuerung ein Token-Fenster. Die Werte im Fenster sind die Aktivierung **in Vielfachen von θ**, auf zwei Nachkommastellen gerundet. Positionen vor `u` sind nur Kontext ohne Wert; `null` bedeutet, dass der Router den Experten dort nicht gewählt hat. Der Feuer-Token (Position `f`) wird, wie vorab festgelegt, nicht mitgezählt.
 
 **Ablauf.** Alle Fenster laufen zuerst gemeinsam durch die unteren Schichten: Jede der 21 Schichten wird einmal geladen, eine Fortschrittsanzeige zählt mit. Danach läuft jedes Fenster einzeln durch die oberen Schichten. Unter dem Ergebnis steht eine beschreibende Diagnose (Zusammenhang, Übereinstimmung nach Fensterart und Position, andere denkbare Definitionen des gespeicherten Werts). Sie ändert die Regel nicht.
 
@@ -201,6 +225,7 @@ Der Atlas speichert für jede Feuerung ein Token-Fenster. Die Werte im Fenster s
 
 code(r'''
 # ---------- Gate 0: Kalibrierung gegen die gespeicherten Atlas-Aktivierungen ----------
+import os
 from neuron_atlas import notebook
 from neuron_atlas.upstream import pole_path
 
@@ -295,10 +320,10 @@ else:
             label = f"{lo_} bis {hi_ - 1 if hi_ < 10**9 else '…'}"
             by_pos[label] = [round(sum(part) / len(part), 4), len(part)]
             print(f"    {label}: {by_pos[label][0]:.3f} (n={len(part)})")
-    print("  Übereinstimmung nach Kontext links im Fenster (Zahl der Token vor der Position):")
+    print("  Übereinstimmung nach Kontext links, nur Fenster ab Textanfang (Zahl der Token vor der Position):")
     by_left = {}
     for lo_, hi_ in ((0, 8), (8, 16), (16, 32), (32, 64), (64, 10**9)):
-        part = [ok for ok, r in zip(ok_val, routed) if lo_ <= r["left"] < hi_]
+        part = [ok for ok, r in zip(ok_val, routed) if lo_ <= r["left"] < hi_ and r["left"] - r["pos"] < 84]
         if part:
             label = f"{lo_} bis {hi_ - 1 if hi_ < 10**9 else '…'}"
             by_left[label] = [round(sum(part) / len(part), 4), len(part)]
@@ -331,6 +356,9 @@ else:
           f"({b_slope[0]} bis {b_slope[1]}), Routing gleich = {show(GATE0B_STATS['share_routing_ok'])} (>= {b_route})")
     print("GATE 0b BESTANDEN" if CALIB_B_OK else "GATE 0b NICHT BESTANDEN", "(nachträglich festgelegt)",
           "| entscheidet über den Abbruch" if use_b else "| nur berichtet (GATE0B = False)")
+    save_json(os.path.join(globals().get("OUT_DIR", "."), "kl_unembedding_gate0.json"),
+              dict(LIB_VERSION=LIB_VERSION, gate0_ok=CALIB_OK, gate0b_ok=CALIB_B_OK, gate0b_used=use_b,
+                   gate0=GATE0_STATS, gate0b=GATE0B_STATS))
     decisive = CALIB_B_OK if use_b else CALIB_OK
     if not decisive and STOP_IF_CALIBRATION_FAILS:
         raise RuntimeError(("Gate 0b" if use_b else "Gate 0") + " nicht bestanden: Hook oder Definition stimmen nicht mit dem Atlas überein.")
@@ -349,9 +377,9 @@ code(r'''
 def weights_for_p1():
     layers = sorted({c[0] for c in CANDIDATES})
     if not P1_FROM_FILES:
-        W_U = model.lm_head.weight.detach().float().cpu()[:V_TOK]
-        gain = (1.0 + text_model(model).norm.weight.detach().float()).cpu()
-        Wd = {L: moe_block(model, L).experts.down_proj.detach().float().cpu() for L in layers}
+        W_U = model.lm_head.weight.detach()[:V_TOK].cpu().float()        # erst auf die CPU, dann umwandeln: spart GPU-Speicher
+        gain = 1.0 + text_model(model).norm.weight.detach().cpu().float()
+        Wd = {L: moe_block(model, L).experts.down_proj.detach().cpu().float() for L in layers}
         return W_U, gain, Wd
     import urllib.request
     BASE = f"https://huggingface.co/{MODEL_ID}/resolve/main/"
@@ -542,20 +570,33 @@ def matched_neurons(L, e, n_cand, texts_ids, k):
 
 CTRL = {}
 if model is not None:
+    import hashlib, os
     check_session(RC, STREAM)
     remove_neuron_hooks(model)
     RC.reset()
     all_ids = [p[0] for p in PAIRS] + [p[2] for p in PAIRS]
-    for (L, e, n) in CANDIDATES:
-        ms, cv = matched_neurons(L, e, n, all_ids, N_MATCH)
-        CTRL[(L, e, n)] = [(e, j) for j in ms]
-        print(f"L{L}_E{e}_N{n}: mittlere Aktivität {cv:.4f}; Kontrollen (Experte {e}): {ms}")
+    # Die Kontrollen werden einmal bestimmt und gesichert; eine spätere Sitzung übernimmt sie, damit fertige Läufe passen.
+    ctrl_sig = hashlib.sha256(repr((LIB_VERSION, CANDIDATES, N_MATCH, PAIRS)).encode()).hexdigest()
+    ctrl_file = os.path.join(globals().get("OUT_DIR", "."), "kl_unembedding_controls.json")
+    saved = load_json(ctrl_file)
+    if saved is not None and saved.get("sig") == ctrl_sig:
+        CTRL = {tuple(c["candidate"]): [tuple(x) for x in c["controls"]] for c in saved["items"]}
+        print("Kontroll-Neuronen aus der Ablage übernommen:", ctrl_file)
+    else:
+        for (L, e, n) in CANDIDATES:
+            ms, cv = matched_neurons(L, e, n, all_ids, N_MATCH)
+            CTRL[(L, e, n)] = [(e, j) for j in ms]
+            print(f"L{L}_E{e}_N{n}: mittlere Aktivität {cv:.4f}", flush=True)
+        save_json(ctrl_file, {"sig": ctrl_sig, "items": [{"candidate": list(k), "controls": [list(x) for x in v]}
+                                                         for k, v in CTRL.items()]})
+    for (L, e, n), cs in CTRL.items():
+        print(f"L{L}_E{e}_N{n}: Kontrollen (Experte {e}): {[j for _, j in cs]}")
 ''')
 
 code(r'''
 # ---------- Läufe: Kandidaten (zwei Arme) und Kontrollen (festgehaltenes Routing) ----------
 assert model is not None, "Dieser Teil braucht das Modell (P1_FROM_FILES = False)"
-import hashlib
+import hashlib, os
 check_session(RC, STREAM)
 remove_neuron_hooks(model)
 RC.reset()
@@ -582,8 +623,9 @@ def run_neuron(L, e, n, arm):
     return per_pair
 
 # Fertige Läufe bleiben erhalten, solange Kandidaten, Satzpaare, Kontrollen und Einstellungen dieselben sind.
-# Nach einem Abbruch setzt ein erneutes Ausführen dieser Zelle dort fort, wo sie stand. Der Zwischenstand steht
-# zusätzlich in kl_unembedding_partial.json (zum Herunterladen, falls die Sitzung endet).
+# Nach einem Abbruch setzt ein erneutes Ausführen dieser Zelle dort fort, wo sie stand. Nach jedem Neuron wird der
+# Zwischenstand in der Ablage gesichert (Google Drive); eine frische Sitzung übernimmt ihn von dort.
+PARTIAL = os.path.join(globals().get("OUT_DIR", "."), "kl_unembedding_partial.json")
 RUN_SIG = hashlib.sha256(repr((LIB_VERSION, CANDIDATES, PAIRS, sorted(CTRL.items()), W_WINDOW, BATCH)).encode()).hexdigest()
 _prev = globals().get("RUN_STATE")
 if _prev is None or _prev.get("sig") != RUN_SIG:
@@ -592,14 +634,23 @@ if _prev is None or _prev.get("sig") != RUN_SIG:
         print(f"Hinweis: {len(_prev['runs']) + len(_prev['ctrl'])} fertige Läufe passen nicht zu den jetzigen Einstellungen "
               "und werden nicht verwendet (sie bleiben in RUN_STATE_PREV).")
     RUN_STATE = {"sig": RUN_SIG, "runs": {}, "ctrl": {}}
+    saved = load_json(PARTIAL)
+    if saved is not None and saved.get("sig") == RUN_SIG:
+        for L_, e_, n_, arm_, v_ in saved.get("runs_list", []):
+            RUN_STATE["runs"][(L_, e_, n_, arm_)] = v_
+        for L_, e_, n_, ce_, cj_, v_ in saved.get("controls_list", []):
+            RUN_STATE["ctrl"][(L_, e_, n_, ce_, cj_)] = v_
+        print(f"Fortgesetzt aus der Ablage: {len(RUN_STATE['runs']) + len(RUN_STATE['ctrl'])} fertige Läufe ({PARTIAL})")
+    elif saved is not None:
+        print("Hinweis: Der Zwischenstand in der Ablage gehört zu anderen Einstellungen und wird nicht verwendet.")
 RUNS, CTRL_DONE = RUN_STATE["runs"], RUN_STATE["ctrl"]
 
 def save_partial():
-    part = {"sig": RUN_SIG, "n_pairs": len(PAIRS),
-            "runs": {f"L{k[0]}_E{k[1]}_N{k[2]}_{k[3]}": v for k, v in RUNS.items()},
-            "controls": {f"L{k[0]}_E{k[1]}_N{k[2]}__E{k[3]}_N{k[4]}": v for k, v in CTRL_DONE.items()}}
-    with open("kl_unembedding_partial.json", "w", encoding="utf-8") as fh:
-        json.dump(part, fh)
+    save_json(PARTIAL, {"sig": RUN_SIG, "n_pairs": len(PAIRS),
+                        "runs_list": [[*k, v] for k, v in RUNS.items()],
+                        "controls_list": [[*k, v] for k, v in CTRL_DONE.items()],
+                        "runs": {f"L{k[0]}_E{k[1]}_N{k[2]}_{k[3]}": v for k, v in RUNS.items()},
+                        "controls": {f"L{k[0]}_E{k[1]}_N{k[2]}__E{k[3]}_N{k[4]}": v for k, v in CTRL_DONE.items()}})
 
 t0 = time.time()
 for (L, e, n) in CANDIDATES:
@@ -724,13 +775,22 @@ print(json.dumps(NUM, indent=1))
 
 code(r'''
 # ---------- Ergebnis speichern und zusammenfassen ----------
+import importlib.metadata as _md, os
+
+def _version(pkg):
+    try:
+        return _md.version(pkg)
+    except Exception:
+        return None
+
 def key_name(k):
     return f"L{k[0]}_E{k[1]}_N{k[2]}_{k[3]}"
 
 out = {
     "config": dict(MODEL_ID=MODEL_ID, LIB_VERSION=LIB_VERSION, CANDIDATES=CANDIDATES, W_WINDOW=W_WINDOW, BATCH=BATCH, N_MATCH=N_MATCH,
                    CAL_ABS=CAL_ABS, CAL_REL=CAL_REL, GATE_VALUE=GATE_VALUE, GATE_ROUTE=GATE_ROUTE,
-                   SMOKE=SMOKE, TEST_MODE=TEST_MODE, SEED=SEED, n_pairs=len(PAIRS)),
+                   SMOKE=SMOKE, TEST_MODE=TEST_MODE, SEED=SEED, n_pairs=len(PAIRS),
+                   versions={p: _version(p) for p in ("torch", "transformers", "triton", "flash-linear-attention", "fla-core")}),
     "gate0_calibration_ok": globals().get("CALIB_OK"),
     "gate0": globals().get("GATE0_STATS"),
     "gate0b_amended": dict(used=globals().get("GATE0B", True), ok=globals().get("CALIB_B_OK"),
@@ -751,6 +811,9 @@ out = {
 with open("kl_unembedding_results.json", "w", encoding="utf-8") as fh:
     json.dump(out, fh, indent=1, ensure_ascii=False)
 print("Gespeichert: kl_unembedding_results.json")
+if os.path.abspath(globals().get("OUT_DIR", ".")) != os.path.abspath("."):
+    save_json(os.path.join(OUT_DIR, "kl_unembedding_results.json"), out)
+    print("Kopie in der Ablage:", os.path.join(OUT_DIR, "kl_unembedding_results.json"))
 print("Gate 0 (vorab festgelegt):", globals().get("CALIB_OK"), "| Gate 0b (nachträglich):", globals().get("CALIB_B_OK"))
 for k, v in out["P2_causal"].items():
     print(k, "->", v["verdict"])
