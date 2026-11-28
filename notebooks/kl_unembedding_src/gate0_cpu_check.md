@@ -33,6 +33,10 @@ Ein zweiter Lauf auf der A100 in bfloat16 (alle 908 übersetzbaren Fenster, Diag
 
 Insgesamt auf der A100: 21,0 % der Werte in Toleranz, Routing 95,6 % gleich, r = 0,936, Steigung 0,902. Auch in bfloat16 auf der GPU erreicht also keiner unserer Rechenwege die Toleranz bei vollem Kontext; der Rest-Unterschied liegt in der Rechnung des Atlas.
 
+## Der Atlas gegen sich selbst
+
+Der Atlas speichert je Feuerung zwei Aktivierungswerte: den Wert am Feuer-Token im Fenster und das Feld `a`. Beim positiven Pol liegen beide nur in 72 % der Feuerungen innerhalb der Toleranz von Gate 0, bei Fenstern mit vollem Kontext (89 von 123) wie bei abgeschnittenen (598 von 827). Beim negativen Pol sind es 82 % und 69 %. Schon die beiden Rechnungen des Atlas halten die Toleranz untereinander also nicht durchgehend ein. Das ergab eine unabhängige Prüfung der Daten mit Gegenprüfung; Abweichungen über 50 % kamen dort nur in abgeschnittenen Fenstern vor.
+
 ## Deutung
 
 1. Hook und Definition stimmen mit dem Atlas überein: Steigung 1,00, r = 0,9975, Routing zu 99 % gleich, keine Verschiebung, kein Vorzeichen- oder θ-Fehler.
