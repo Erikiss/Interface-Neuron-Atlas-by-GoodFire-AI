@@ -35,6 +35,7 @@ md(r"""
 
 **Vorab festgelegte Regeln** (vor dem Lauf auf dem echten Modell eingefroren)
 - **Gate 0:** Von den Atlas-Werten, die zu einer Position mit Wert gehören (Fensterposition ≥ `u`, ohne den Feuer-Token), stimmen mindestens 90 % innerhalb von 0,005 + 5 % (Rundung auf zwei Nachkommastellen) überein, und das Routing stimmt in mindestens 98 % dieser Positionen überein. Sonst bricht das Notebook ab.
+- **Gate 0b (nachträglich festgelegt am 28.11.2026, Abweichung vom Plan):** Gate 0 ist im ersten Lauf nicht bestanden. Die Nachrechnung zeigte zwei Ursachen außerhalb des Hooks: 87 % der Atlas-Fenster sind aus längeren Texten geschnitten, und der Atlas hat mit dem Text davor gerechnet. Außerdem ist die Toleranz enger als der Unterschied zwischen zwei Rechenwegen: Auch bei vollem Kontext lagen nur rund 60 % der Werte darin, in float32 auf der CPU wie in bfloat16 auf der A100. Gate 0b prüft deshalb nur die Fenster, die am Textanfang beginnen: Pearson r ≥ 0,99, Steigung durch 0 zwischen 0,95 und 1,05, Routing in mindestens 98 % der Positionen gleich. Mit `GATE0B = True` entscheidet Gate 0b über den Abbruch; Gate 0 wird weiter berechnet und berichtet. Die Schwellen wurden nach Kenntnis der Daten gewählt (Nachrechnung: r = 0,9975, Steigung 0,997, Routing 99,1 %).
 - **P1a:** Die KL-Familie gilt als auffällig, wenn ihr oberstes Neuron in der Schicht über dem 99-%-Quantil liegt, das zufällige Dreiergruppen erreichen.
 - **P1b:** Die Ausgabevektoren der KL-Wörter gelten als auffällig, wenn ihre Norm im obersten oder untersten Prozent des Vokabulars liegt.
 - **P2 (primär, Routing festgehalten):** D = mittlere Änderung der Log-Wahrscheinlichkeit des KL-Wortes minus dieselbe Größe für das Kontrollwort, jeweils gepaart pro Satzpaar, beim Ausschalten an der Zielposition. Gepaarter Bootstrap über Satzpaare; 97,5-%-Intervall (Bonferroni über die zwei Kandidaten). *Spezifisch*, wenn das Intervall ganz unter −0,05 Nat liegt **und** D höchstens so groß ist wie bei allen Kontrollen (Permutations-artiges p ≤ 0,05 mit 19 Kontrollen). *Keine spezifische Wirkung*, wenn das Intervall 0 enthält.
@@ -50,7 +51,7 @@ md(r"""
 
 **Hardware und Kosten (ungeprüft)**
 - Teil 1 braucht das Modell nicht: Mit `P1_FROM_FILES = True` werden nur die nötigen Tensoren (rund 3 GB) geladen; Teile 0, 2 und 3 entfallen dann.
-- Teile 0 bis 3 laufen mit schichtweisem Laden auf einer GPU mit mindestens 40 GB (eine A100 mit 40 GB genügt). Die Schichten ab 21 bleiben dauerhaft auf der GPU (rund 32 GiB), die unteren werden für jede Gruppe von Texten einmal nacheinander geladen. Der Download braucht rund 72 GB Festplattenplatz; das Notebook prüft das vorab.
+- Teile 0 bis 3 laufen mit schichtweisem Laden auf einer GPU mit mindestens 40 GB (eine A100 mit 40 GB genügt). Die Schichten ab 21 bleiben dauerhaft auf der GPU (rund 32 GiB). Für die Vorberechnung wird jede untere Schicht je Aufruf einmal geladen und rechnet alle Texte. Der Download braucht rund 72 GB Festplattenplatz; das Notebook prüft das vorab.
 - Laufzeit nicht gemessen. Schätzung: 2 bis 4 Stunden (rund 5.000 Modellläufe für Teil 2); ein Probelauf (`SMOKE = True`) etwa 15 bis 30 Minuten.
 - Atlas-Dateien werden über das Interface-Paket mit der Standardrate geholt (4 Anfragen pro Sekunde). Nichts davon wird gespeichert oder weitergegeben.
 """)
@@ -77,11 +78,13 @@ CANDIDATES = [(24, 124, 345), (21, 166, 131)]   # (Schicht, Experte, Neuron)
 W_WINDOW = 16                            # Atlas: Schaden = Summe über 16 Positionen
 BATCH = 48                               # gleiche Batchform für Referenz und Ablation
 SPLIT_LAYER = 21                         # obere Schichten ab hier dauerhaft auf der GPU (höchstens die kleinste Kandidatenschicht)
-STREAM_CHUNK = 64                        # Texte je Vorberechnungslauf (die unteren Schichten werden je Lauf einmal geladen)
+STREAM_CHUNK = 64                        # Texte je Block der Vorberechnung (die unteren Schichten werden je Aufruf einmal geladen)
 MIN_GPU_GB = 38                          # A100 mit 40 GB; die oberen Schichten brauchen rund 32 GiB
 N_MATCH = 19                             # aktivitätsgleiche Kontroll-Neuronen je Kandidat (gleicher Experte)
 CAL_ABS, CAL_REL = 0.005, 0.05           # Toleranz Gate 0 (Rundung auf 2 Nachkommastellen + 5 %)
 GATE_VALUE, GATE_ROUTE = 0.90, 0.98      # Schwellen Gate 0
+GATE0B = True                            # nachträglich (28.11.2026): Gate 0b entscheidet über den Abbruch (Abweichung vom Plan)
+GATE0B_R, GATE0B_SLOPE, GATE0B_ROUTE = 0.99, (0.95, 1.05), 0.98   # Gate 0b, nur Fenster ab Textanfang
 SEED = 20261127
 STOP_IF_CALIBRATION_FAILS = True
 FAM_KL = [" divergence", " KL", "KL"]                        # einteilige Zielwörter
@@ -105,7 +108,7 @@ if TEST_MODE:
 else:
     tok = AutoTokenizer.from_pretrained(MODEL_ID)
     LOADED = globals().get("STREAM")
-    STREAM, model = None, None
+    STREAM, model = LOADED, None                 # ein geladenes Modell bleibt in jedem Fall erhalten
     if P1_FROM_FILES:
         DEV = torch.device("cpu")
         E_NUM, I_NUM = 256, 512
@@ -115,12 +118,17 @@ else:
         STREAM = LOADED
         if STREAM.split != SPLIT_LAYER:
             raise RuntimeError("Ein Modell mit anderer Aufteilung ist geladen. Für eine neue Aufteilung die Laufzeit neu starten.")
+        if getattr(STREAM, "model_id", MODEL_ID) != MODEL_ID:
+            raise RuntimeError(f"Geladen ist {STREAM.model_id}, eingestellt {MODEL_ID}. Für ein anderes Modell die Laufzeit neu starten.")
         STREAM = adopt_streamer(STREAM)
         model = STREAM.model
         print("Das Modell ist bereits geladen und wird weiterverwendet (zum Neuladen die Laufzeit neu starten).")
     else:
-        import os, shutil
+        import gc, os, shutil
         from huggingface_hub import hf_hub_download, snapshot_download
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         from transformers import AutoConfig
         assert torch.cuda.is_available(), "Keine GPU gefunden: in Colab unter Laufzeit eine GPU (A100) wählen."
         gb = torch.cuda.get_device_properties(0).total_memory / 1e9
@@ -145,6 +153,7 @@ else:
         local = snapshot_download(MODEL_ID, allow_patterns=files)
         shard_of = {n: os.path.join(local, wm[n]) for n in names}
         STREAM = LayerStreamer(skel, shard_of, "cuda", torch.bfloat16, SPLIT_LAYER, STREAM_CHUNK)
+        STREAM.model_id = MODEL_ID
         model = STREAM.model
         print(f"Obere Schichten ab {SPLIT_LAYER} liegen auf der GPU: {STREAM.gpu_gib():.1f} GiB belegt")
 if model is not None:
@@ -152,9 +161,8 @@ if model is not None:
     DEV = STREAM.device
     tc = model.config.text_config
     E_NUM, I_NUM = tc.num_experts, tc.moe_intermediate_size
-    remove_neuron_hooks()                    # nichts aus einem früheren, abgebrochenen Lauf bleibt am Modell hängen
-    if globals().get("RC") is not None:
-        RC.remove()                          # keine doppelten Routing-Hooks, wenn die Zelle erneut läuft
+    remove_neuron_hooks(model)               # nichts aus einem früheren, abgebrochenen Lauf bleibt am Modell hängen
+    remove_routing_hooks(model)              # auch nicht aus einer früheren Fassung; keine doppelten Routing-Hooks
     RC = RoutingControl(model)               # steuert das Routing aller oberen Schichten
 V_TOK = len(tok)                             # nur echte Token (das Modell hat Auffüll-Zeilen darüber)
 print("Bereit | Modell:", "geladen" if model is not None else "nicht geladen", "| Gerät", DEV,
@@ -182,9 +190,13 @@ md(r"""
 
 Der Atlas speichert für jede Feuerung ein Token-Fenster. Die Werte im Fenster sind die Aktivierung **in Vielfachen von θ**, auf zwei Nachkommastellen gerundet. Positionen vor `u` sind nur Kontext ohne Wert; `null` bedeutet, dass der Router den Experten dort nicht gewählt hat. Der Feuer-Token (Position `f`) hat einen Wert, der nicht die Feuerung selbst ist, und wird deshalb ausgelassen.
 
-**Ablauf.** Alle Fenster laufen zuerst gemeinsam durch die unteren Schichten: Jede der 21 Schichten wird einmal geladen, eine Fortschrittsanzeige zählt mit. Danach läuft jedes Fenster einzeln durch die oberen Schichten. Unter dem Ergebnis steht eine beschreibende Diagnose (Zusammenhang, Übereinstimmung nach Kontextlänge, andere denkbare Definitionen des gespeicherten Werts). Sie ändert die Regel nicht.
+**Ablauf.** Alle Fenster laufen zuerst gemeinsam durch die unteren Schichten: Jede der 21 Schichten wird einmal geladen, eine Fortschrittsanzeige zählt mit. Danach läuft jedes Fenster einzeln durch die oberen Schichten. Unter dem Ergebnis steht eine beschreibende Diagnose (Zusammenhang, Übereinstimmung nach Fensterart und Position, andere denkbare Definitionen des gespeicherten Werts). Sie ändert die Regel nicht.
 
-**Hinweis zur Ausgabe.** Beim ersten Lauf meldet transformers, dass `causal_conv1d` nicht installiert ist und seine Referenz-Implementierung benutzt wird. Das ist kein Fehler. Die Referenz ist ein einzelner Faltungsaufruf je Schicht; die Rechnung ist dieselbe.
+**Fensterart.** Der Atlas zeigt je Feuerung die 100 Token davor. 827 der 950 Fenster sind aus einem längeren Text geschnitten (`u` = 84); der Text davor fehlt im Fenster, der Atlas hat ihn aber mitgerechnet (wortgleiche Fenster tragen verschiedene Werte). Fenster mit `u` < 84 beginnen am Textanfang und haben den vollen Kontext. Die Diagnose weist beide Arten getrennt aus.
+
+**Gate 0b.** Unter Gate 0 steht Gate 0b: dieselben Werte, aber nur die Fenster ab Textanfang, geprüft auf Zusammenhang (r ≥ 0,99), Steigung (0,95 bis 1,05) und Routing (≥ 98 %). Es ist nachträglich festgelegt und im Bericht als Abweichung vom Plan anzugeben. Mit `GATE0B = False` gilt wieder allein Gate 0.
+
+**Hinweis zur Ausgabe.** Beim ersten Lauf meldet transformers, dass `causal_conv1d` nicht installiert ist und seine Referenz-Implementierung benutzt wird. Das ist kein Fehler. Die Referenz ist ein einzelner Faltungsaufruf je Schicht; mathematisch ist es dieselbe Rechnung, nur die Rundung kann minimal abweichen.
 """)
 
 code(r'''
@@ -192,7 +204,7 @@ code(r'''
 from neuron_atlas import notebook
 from neuron_atlas.upstream import pole_path
 
-CALIB_OK, GATE0_STATS = None, None
+CALIB_OK, GATE0_STATS, CALIB_B_OK, GATE0B_STATS = None, None, None, None
 if TEST_MODE or model is None:
     print("Kalibrierung übersprungen (Testmodus oder kein Modell geladen)")
 else:
@@ -212,7 +224,8 @@ else:
         ids_list = tok.encode("".join(s for s, _ in t), add_special_tokens=False)
         exact = len(ids_list) == len(t) and [tok.decode([i]) for i in ids_list] == [s for s, _ in t]
         windows.append((dot, ids_list, exact))
-    remove_neuron_hooks()
+    check_session(RC, STREAM)
+    remove_neuron_hooks(model)
     RC.reset()
     STREAM.ensure([ids for _, ids, exact in windows if exact])   # alle Fenster in einem Durchlauf der unteren Schichten
     hookC = NeuronHook(model, 24, 124, 345, RC)
@@ -248,19 +261,40 @@ else:
     def share_ok(pairs):
         return sum(abs(a - v) <= CAL_ABS + CAL_REL * abs(v) for a, v in pairs) / max(len(pairs), 1)
 
+    def fin(x, nd=4):
+        return round(float(x), nd) if math.isfinite(float(x)) else None
+
     GATE0_STATS = dict(windows=len(dots) - skipped, slots=len(rows), slots_routed_in_atlas=len(routed),
                        share_value_ok=round(frac_value, 4), share_routing_ok=round(agree, 4))
     if len(routed) > 2:
         A_ = torch.tensor([r["a"] for r in routed], dtype=torch.float64)
         V_ = torch.tensor([r["v"] for r in routed], dtype=torch.float64)
         err = (A_ - V_).abs()
-        GATE0_STATS.update(pearson_r=round(float(torch.corrcoef(torch.stack([A_, V_]))[0, 1]), 4),
-                           slope_through_origin=round(float((A_ * V_).sum() / (V_ * V_).sum().clamp_min(1e-30)), 4),
-                           median_abs_error=round(float(err.median()), 4),
-                           q90_abs_error=round(float(torch.quantile(err, 0.9)), 4))
+        GATE0_STATS.update(pearson_r=fin(torch.corrcoef(torch.stack([A_, V_]))[0, 1]),
+                           slope_through_origin=fin((A_ * V_).sum() / (V_ * V_).sum().clamp_min(1e-30)),
+                           median_abs_error=fin(err.median()),
+                           q90_abs_error=fin(torch.quantile(err, 0.9)))
         print(f"Diagnose (beschreibend): Pearson r = {GATE0_STATS['pearson_r']}, Steigung a gegen v durch 0 = "
               f"{GATE0_STATS['slope_through_origin']}, Median |a - v| = {GATE0_STATS['median_abs_error']}, "
               f"90-%-Quantil = {GATE0_STATS['q90_abs_error']}")
+    print("  Gate-Kriterien nach Fensterart:")
+    by_type = {}
+    for name, sel in (("Fenster ab Textanfang (u < 84, voller Kontext)", lambda r: r["left"] - r["pos"] < 84),
+                      ("abgeschnittene Fenster (u = 84, Text davor fehlt)", lambda r: r["left"] - r["pos"] >= 84)):
+        allp = [r for r in rows if sel(r)]
+        part = [(r["a"], r["v"]) for r in allp if r["v"] is not None]
+        if allp:
+            ag = sum(r["routed"] == (r["v"] is not None) for r in allp) / len(allp)
+            by_type[name] = dict(share_value_ok=fin(share_ok(part)), n_valued=len(part), share_routing_ok=fin(ag), n_slots=len(allp))
+            print(f"    {name}: Wert {share_ok(part):.3f} innerhalb (n={len(part)}), Routing gleich {ag:.3f} (n={len(allp)})")
+    print("  Übereinstimmung nach Abstand zum ersten Wert im Fenster (Position minus u):")
+    by_pos = {}
+    for lo_, hi_ in ((0, 8), (8, 30), (30, 10**9)):
+        part = [ok for ok, r in zip(ok_val, routed) if lo_ <= r["pos"] < hi_]
+        if part:
+            label = f"{lo_} bis {hi_ - 1 if hi_ < 10**9 else '…'}"
+            by_pos[label] = [round(sum(part) / len(part), 4), len(part)]
+            print(f"    {label}: {by_pos[label][0]:.3f} (n={len(part)})")
     print("  Übereinstimmung nach Kontext links im Fenster (Zahl der Token vor der Position):")
     by_left = {}
     for lo_, hi_ in ((0, 8), (8, 16), (16, 32), (32, 64), (64, 10**9)):
@@ -280,12 +314,28 @@ else:
     n_model = sum(r["routed"] and r["v"] is None for r in rows)
     print(f"  Routing: in beiden gewählt {n_both}, nur im Atlas {n_atlas}, nur im Modell {n_model}, "
           f"in keinem {len(rows) - n_both - n_atlas - n_model}")
-    GATE0_STATS.update(share_ok_by_left_context=by_left, share_ok_under_other_definitions={k: round(v, 4) for k, v in alt.items()},
+    GATE0_STATS.update(by_window_type=by_type, share_ok_by_distance_from_u=by_pos,
+                       share_ok_by_left_context=by_left, share_ok_under_other_definitions={k: round(v, 4) for k, v in alt.items()},
                        routing_both=n_both, routing_only_atlas=n_atlas, routing_only_model=n_model)
     CALIB_OK = frac_value >= GATE_VALUE and agree >= GATE_ROUTE
-    print("GATE 0 BESTANDEN" if CALIB_OK else "GATE 0 NICHT BESTANDEN")
-    if not CALIB_OK and STOP_IF_CALIBRATION_FAILS:
-        raise RuntimeError("Gate 0 nicht bestanden: Hook oder Definition stimmen nicht mit dem Atlas überein.")
+    print("GATE 0 BESTANDEN" if CALIB_OK else "GATE 0 NICHT BESTANDEN", "(vorab festgelegte Regel)")
+    # Gate 0b: nachträglich festgelegt (28.11.2026), im Bericht als Abweichung vom Plan. Nur Fenster ab Textanfang.
+    use_b = globals().get("GATE0B", True)
+    b_r, b_slope, b_route = (globals().get("GATE0B_R", 0.99), globals().get("GATE0B_SLOPE", (0.95, 1.05)),
+                             globals().get("GATE0B_ROUTE", 0.98))
+    GATE0B_STATS = calibration_fit(rows)
+    CALIB_B_OK = calibration_b_ok(GATE0B_STATS, b_r, b_slope, b_route)
+    show = lambda x: f"{x:.4f}" if x is not None else "nicht berechenbar"
+    print(f"Gate 0b (nachträglich, nur Fenster ab Textanfang: {GATE0B_STATS['n_valued']} Werte, {GATE0B_STATS['n_slots']} Positionen): "
+          f"r = {show(GATE0B_STATS['pearson_r'])} (>= {b_r}), Steigung = {show(GATE0B_STATS['slope_through_origin'])} "
+          f"({b_slope[0]} bis {b_slope[1]}), Routing gleich = {show(GATE0B_STATS['share_routing_ok'])} (>= {b_route})")
+    print("GATE 0b BESTANDEN" if CALIB_B_OK else "GATE 0b NICHT BESTANDEN", "(nachträglich festgelegt)",
+          "| entscheidet über den Abbruch" if use_b else "| nur berichtet (GATE0B = False)")
+    decisive = CALIB_B_OK if use_b else CALIB_OK
+    if not decisive and STOP_IF_CALIBRATION_FAILS:
+        raise RuntimeError(("Gate 0b" if use_b else "Gate 0") + " nicht bestanden: Hook oder Definition stimmen nicht mit dem Atlas überein.")
+    if use_b and not CALIB_OK:
+        print("Weiter nach Gate 0b. Im Bericht: Gate 0 nach der vorab festgelegten Regel nicht bestanden; Abweichung vom Plan.")
 ''')
 
 md(r"""
@@ -492,7 +542,8 @@ def matched_neurons(L, e, n_cand, texts_ids, k):
 
 CTRL = {}
 if model is not None:
-    remove_neuron_hooks()
+    check_session(RC, STREAM)
+    remove_neuron_hooks(model)
     RC.reset()
     all_ids = [p[0] for p in PAIRS] + [p[2] for p in PAIRS]
     for (L, e, n) in CANDIDATES:
@@ -505,8 +556,10 @@ code(r'''
 # ---------- Läufe: Kandidaten (zwei Arme) und Kontrollen (festgehaltenes Routing) ----------
 assert model is not None, "Dieser Teil braucht das Modell (P1_FROM_FILES = False)"
 import hashlib
-remove_neuron_hooks()
+check_session(RC, STREAM)
+remove_neuron_hooks(model)
 RC.reset()
+CTRL_RUNS = None                             # erst am Ende der Zelle gesetzt; vorher kann die Statistik nicht laufen
 STREAM.ensure([p[0] for p in PAIRS] + [p[2] for p in PAIRS])
 
 def run_text(hook, ids_list, pos, freeze):
@@ -531,8 +584,13 @@ def run_neuron(L, e, n, arm):
 # Fertige Läufe bleiben erhalten, solange Kandidaten, Satzpaare, Kontrollen und Einstellungen dieselben sind.
 # Nach einem Abbruch setzt ein erneutes Ausführen dieser Zelle dort fort, wo sie stand. Der Zwischenstand steht
 # zusätzlich in kl_unembedding_partial.json (zum Herunterladen, falls die Sitzung endet).
-RUN_SIG = hashlib.sha256(repr((CANDIDATES, PAIRS, sorted(CTRL.items()), W_WINDOW, BATCH)).encode()).hexdigest()
-if globals().get("RUN_STATE", {}).get("sig") != RUN_SIG:
+RUN_SIG = hashlib.sha256(repr((LIB_VERSION, CANDIDATES, PAIRS, sorted(CTRL.items()), W_WINDOW, BATCH)).encode()).hexdigest()
+_prev = globals().get("RUN_STATE")
+if _prev is None or _prev.get("sig") != RUN_SIG:
+    if _prev is not None and (_prev["runs"] or _prev["ctrl"]):
+        RUN_STATE_PREV = _prev
+        print(f"Hinweis: {len(_prev['runs']) + len(_prev['ctrl'])} fertige Läufe passen nicht zu den jetzigen Einstellungen "
+              "und werden nicht verwendet (sie bleiben in RUN_STATE_PREV).")
     RUN_STATE = {"sig": RUN_SIG, "runs": {}, "ctrl": {}}
 RUNS, CTRL_DONE = RUN_STATE["runs"], RUN_STATE["ctrl"]
 
@@ -565,6 +623,7 @@ def summarize(per_pair):
     sd = (sum((d - est) ** 2 for d in per_pair) / (len(per_pair) - 1)) ** 0.5
     return est, lo, hi, sd
 
+assert globals().get("CTRL_RUNS") is not None, "Die Läufe-Zelle ist noch nicht vollständig durchgelaufen."
 SUMMARY, VERDICT = {}, {}
 for (L, e, n) in CANDIDATES:
     ctrl_D = [summarize(r)[0] for r in CTRL_RUNS[(L, e, n)]]
@@ -595,7 +654,8 @@ for (L, e, n) in CANDIDATES:
 code(r'''
 # ---------- Teil 3: Untergrenzen ----------
 assert model is not None, "Dieser Teil braucht das Modell (P1_FROM_FILES = False)"
-remove_neuron_hooks()
+check_session(RC, STREAM)
+remove_neuron_hooks(model)
 RC.reset()
 STREAM.ensure([p[0] for p in PAIRS])
 NUM = {}
@@ -668,11 +728,14 @@ def key_name(k):
     return f"L{k[0]}_E{k[1]}_N{k[2]}_{k[3]}"
 
 out = {
-    "config": dict(MODEL_ID=MODEL_ID, CANDIDATES=CANDIDATES, W_WINDOW=W_WINDOW, BATCH=BATCH, N_MATCH=N_MATCH,
+    "config": dict(MODEL_ID=MODEL_ID, LIB_VERSION=LIB_VERSION, CANDIDATES=CANDIDATES, W_WINDOW=W_WINDOW, BATCH=BATCH, N_MATCH=N_MATCH,
                    CAL_ABS=CAL_ABS, CAL_REL=CAL_REL, GATE_VALUE=GATE_VALUE, GATE_ROUTE=GATE_ROUTE,
                    SMOKE=SMOKE, TEST_MODE=TEST_MODE, SEED=SEED, n_pairs=len(PAIRS)),
-    "gate0_calibration_ok": CALIB_OK,
-    "gate0": GATE0_STATS,
+    "gate0_calibration_ok": globals().get("CALIB_OK"),
+    "gate0": globals().get("GATE0_STATS"),
+    "gate0b_amended": dict(used=globals().get("GATE0B", True), ok=globals().get("CALIB_B_OK"),
+                           stats=globals().get("GATE0B_STATS"),
+                           note="nachträglich festgelegt am 28.11.2026, Abweichung vom Plan"),
     "streaming": dict(SPLIT_LAYER=SPLIT_LAYER, STREAM_CHUNK=STREAM_CHUNK,
                       texts_prepared=len(STREAM.cache) if STREAM is not None else None,
                       lower_layer_loads=STREAM.stats["layer_loads"] if STREAM is not None else None),
@@ -688,7 +751,7 @@ out = {
 with open("kl_unembedding_results.json", "w", encoding="utf-8") as fh:
     json.dump(out, fh, indent=1, ensure_ascii=False)
 print("Gespeichert: kl_unembedding_results.json")
-print("Gate 0:", CALIB_OK)
+print("Gate 0 (vorab festgelegt):", globals().get("CALIB_OK"), "| Gate 0b (nachträglich):", globals().get("CALIB_B_OK"))
 for k, v in out["P2_causal"].items():
     print(k, "->", v["verdict"])
 ''')

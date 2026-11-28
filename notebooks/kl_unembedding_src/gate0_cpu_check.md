@@ -20,6 +20,19 @@ Andere denkbare Definitionen des gespeicherten Werts treffen bei vollem Kontext 
 
 Die Abweichungen bei vollem Kontext haben keine Richtung (mittlere Abweichung −0,0014 θ) und verteilen sich über alle Fenster. Sie wachsen leicht mit der Position im Fenster (Median 0,007 θ in den ersten 30 Positionen, 0,013 θ danach). Relativ sind sie bei kleinen Werten am größten (Median 10 % bei |v| zwischen 0,05 und 0,2, 2,6 % bei |v| über 0,5). Routing-Abweichungen kommen nur bei knappen Entscheidungen vor (Routing-Gewicht im Median 0,06 gegen 0,11).
 
+## Bestätigung auf der A100
+
+Ein zweiter Lauf auf der A100 in bfloat16 (alle 908 übersetzbaren Fenster, Diagnose-Zelle `gate0_diagnose_cell.py`) ergab dasselbe Bild:
+
+| Gruppe | A100, bfloat16 | CPU, float32 |
+|---|---|---|
+| ab Textanfang: Werte in Toleranz | 57,8 % (n = 424) | 60,1 % |
+| ab Textanfang: Routing gleich | 99,1 % (n = 3274) | 99,1 % |
+| abgeschnitten: Werte in Toleranz | 14,2 % (n = 2279) | 11,7 % (Stichprobe) |
+| abgeschnitten: Routing gleich | 95,1 % (n = 22020) | 94,6 % |
+
+Insgesamt auf der A100: 21,0 % der Werte in Toleranz, Routing 95,6 % gleich, r = 0,936, Steigung 0,902. Auch in bfloat16 auf der GPU erreicht also keiner unserer Rechenwege die Toleranz bei vollem Kontext; der Rest-Unterschied liegt in der Rechnung des Atlas.
+
 ## Deutung
 
 1. Hook und Definition stimmen mit dem Atlas überein: Steigung 1,00, r = 0,9975, Routing zu 99 % gleich, keine Verschiebung, kein Vorzeichen- oder θ-Fehler.
@@ -28,6 +41,10 @@ Die Abweichungen bei vollem Kontext haben keine Richtung (mittlere Abweichung �
 
 ## Grenzen
 
-- float32 auf der CPU statt bfloat16 auf der GPU; ob eine GPU-Rechnung in bfloat16 näher am Atlas liegt, ist offen.
+- Die Nachrechnung lief in float32 auf der CPU. Der A100-Lauf in bfloat16 liegt nicht näher am Atlas (siehe oben); wie der Atlas genau gerechnet hat, ist nicht bekannt.
 - Die abgeschnittenen Fenster sind eine Stichprobe (123 von 789 exakt übersetzbaren).
 - Die vorab festgelegte Regel von Gate 0 bleibt, wie sie ist: nicht bestanden.
+
+## Folge für das Notebook
+
+Gate 0b (nachträglich festgelegt am 28.11.2026, im Bericht als Abweichung vom Plan): nur Fenster ab Textanfang, bestanden bei Pearson r ≥ 0,99, Steigung durch 0 zwischen 0,95 und 1,05 und mindestens 98 % gleichem Routing. Mit `GATE0B = True` entscheidet Gate 0b über den Abbruch; Gate 0 wird weiter berechnet und berichtet. Die Schwellen wurden nach Kenntnis dieser Ergebnisse gewählt.

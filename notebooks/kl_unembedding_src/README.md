@@ -19,6 +19,8 @@ python build_nb2.py ../kl_unembedding_test.ipynb
 | `test_update_cell.py` | Stellt eine solche Sitzung nach (vorige Fassung unter `snap/`, mitten in Gate 0 unterbrochen) und prüft die Zelle gegen einen frischen Lauf |
 | `gate0_diagnose_cell.py` | Diagnose nach einem nicht bestandenen Gate 0 aus den schon gerechneten Werten der Sitzung, getrennt nach Fenstern mit und ohne Textanfang |
 | `test_gate0_diagnose.py` | Prüft die Diagnose-Zelle in nachgestellten Sitzungen der vorigen (`snap/`) und der neuen Fassung (`snap2/`) |
+| `test_gate0b_decision.py` | Prüft in der echten Gate-0-Zelle mit den echten Atlas-Fenstern, wann Gate 0 und Gate 0b den Lauf anhalten |
+| `neg_check_s16.py` | Gegenprobe: Der Abbruch-Test erkennt eine festgehaltene Schicht im Stand vor der Korrektur |
 | `cpu_gate0.py` | Rechnet Gate 0 ohne GPU nach: Schichten 0 bis 24 der echten Gewichte, Schicht für Schicht vom Hub geladen, getrennt nach Fensterart |
 | `gate0_cpu_check.md` | Ergebnis dieser Nachrechnung vom 28.11.2026 und seine Deutung |
 
