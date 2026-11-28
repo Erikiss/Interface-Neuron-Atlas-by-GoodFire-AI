@@ -17,6 +17,8 @@ python build_nb2.py ../kl_unembedding_test.ipynb
 | `dryrun_real_branch.py` | Trockenlauf der Modellzelle bis zum Download, mit nachgebildeter GPU |
 | `update_cell.py` | Zelle für eine laufende Sitzung mit der vorigen Fassung: holt die neue Fassung von GitHub, übernimmt das geladene Modell und rechnet ab Gate 0 weiter |
 | `test_update_cell.py` | Stellt eine solche Sitzung nach (vorige Fassung unter `snap/`, mitten in Gate 0 unterbrochen) und prüft die Zelle gegen einen frischen Lauf |
+| `gate0_diagnose_cell.py` | Diagnose nach einem nicht bestandenen Gate 0 aus den schon gerechneten Werten der Sitzung, getrennt nach Fenstern mit und ohne Textanfang |
+| `test_gate0_diagnose.py` | Prüft die Diagnose-Zelle in nachgestellten Sitzungen der vorigen (`snap/`) und der neuen Fassung (`snap2/`) |
 
 ## Tests ausführen
 
