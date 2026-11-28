@@ -34,7 +34,7 @@ md(r"""
 3. **Numerik:** Untergrenze durch die Batchgröße, No-op-Kontrolle, negative Werte der naiven KL-Formel.
 
 **Vorab festgelegte Regeln** (vor dem Lauf auf dem echten Modell eingefroren)
-- **Gate 0:** Von den Atlas-Werten, die zu einer Position mit Wert gehören (Fensterposition ≥ `u`, ohne den Feuer-Token), stimmen mindestens 90 % innerhalb von 0,005 + 5 % (Rundung auf zwei Nachkommastellen) überein, und das Routing stimmt in mindestens 98 % dieser Positionen überein. Sonst bricht das Notebook ab.
+- **Gate 0:** Von den Atlas-Werten, die zu einer Position mit Wert gehören (Fensterposition ≥ `u`, ohne den Feuer-Token), stimmen mindestens 90 % innerhalb von 0,005 + 5 % (Rundung auf zwei Nachkommastellen) überein, und das Routing stimmt in mindestens 98 % dieser Positionen überein (gerechnet über alle Positionen ab `u` ohne den Feuer-Token, mit und ohne Atlas-Wert, so wie es der Code von Anfang an tut; Klarstellung vom 28.11.2026). Sonst bricht das Notebook ab.
 - **Gate 0b (nachträglich festgelegt am 28.11.2026, Abweichung vom Plan):** Gate 0 ist im ersten Lauf nicht bestanden. Die Nachrechnung zeigte zwei Ursachen außerhalb des Hooks: 87 % der Atlas-Fenster sind aus längeren Texten geschnitten, und der Atlas hat mit dem Text davor gerechnet. Außerdem ist die Toleranz enger als der Unterschied zwischen zwei Rechenwegen: Auch bei vollem Kontext lagen nur rund 60 % der Werte darin, in float32 auf der CPU wie in bfloat16 auf der A100. Gate 0b prüft deshalb nur die Fenster, die am Textanfang beginnen: Pearson r ≥ 0,99, Steigung durch 0 zwischen 0,95 und 1,05, Routing in mindestens 98 % der Positionen gleich. Mit `GATE0B = True` entscheidet Gate 0b über den Abbruch; Gate 0 wird weiter berechnet und berichtet. Die Schwellen wurden nach Kenntnis der Daten gewählt (Nachrechnung: r = 0,9975, Steigung 0,997, Routing 99,1 %).
 - **P1a:** Die KL-Familie gilt als auffällig, wenn ihr oberstes Neuron in der Schicht über dem 99-%-Quantil liegt, das zufällige Dreiergruppen erreichen.
 - **P1b:** Die Ausgabevektoren der KL-Wörter gelten als auffällig, wenn ihre Norm im obersten oder untersten Prozent des Vokabulars liegt.
@@ -188,6 +188,7 @@ if model is not None:
     remove_neuron_hooks(model)               # nichts aus einem früheren, abgebrochenen Lauf bleibt am Modell hängen
     remove_routing_hooks(model)              # auch nicht aus einer früheren Fassung; keine doppelten Routing-Hooks
     RC = RoutingControl(model)               # steuert das Routing aller oberen Schichten
+    print("torch", torch.__version__, "| Experten-Implementierung:", getattr(tc, "_experts_implementation", None))
 V_TOK = len(tok)                             # nur echte Token (das Modell hat Auffüll-Zeilen darüber)
 print("Bereit | Modell:", "geladen" if model is not None else "nicht geladen", "| Gerät", DEV,
       "| Experten", E_NUM, "| Neuronen je Experte", I_NUM, "| Token", V_TOK)
@@ -279,7 +280,7 @@ else:
     frac_value = sum(ok_val) / len(routed)
     agree = sum(r["routed"] == (r["v"] is not None) for r in rows) / len(rows)
     print(f"Fenster übernommen: {len(dots) - skipped} von {len(dots)} (nicht exakt übersetzt: {skipped})")
-    print(f"Positionen mit Atlas-Wert (ohne Kontext, ohne Feuer-Token): {len(rows)}, davon gerouted: {len(routed)}")
+    print(f"Positionen ab u (ohne Feuer-Token): {len(rows)}, davon mit Atlas-Wert (Experte im Atlas gewählt): {len(routed)}")
     print(f"Wert innerhalb 0,005 + 5 %: {frac_value:.3f}   (Gate: >= {GATE_VALUE})")
     print(f"Routing stimmt überein:     {agree:.3f}   (Gate: >= {GATE_ROUTE})")
     # Beschreibende Diagnose. Sie ändert die Regel nicht; sie zeigt, woran es liegt, falls das Gate nicht besteht.
@@ -361,7 +362,11 @@ else:
                    gate0=GATE0_STATS, gate0b=GATE0B_STATS))
     decisive = CALIB_B_OK if use_b else CALIB_OK
     if not decisive and STOP_IF_CALIBRATION_FAILS:
-        raise RuntimeError(("Gate 0b" if use_b else "Gate 0") + " nicht bestanden: Hook oder Definition stimmen nicht mit dem Atlas überein.")
+        if use_b:
+            raise RuntimeError("Gate 0b nicht bestanden: Auf den Fenstern ab Textanfang (voller Kontext) stimmen Hook oder "
+                               "Definition nicht mit dem Atlas überein. Die Werte stehen oben.")
+        raise RuntimeError("Gate 0 nicht bestanden. Mögliche Ursachen zeigt die Diagnose oben: abgeschnittene Fenster ohne den "
+                           "Text davor, die enge Toleranz oder der Hook.")
     if use_b and not CALIB_OK:
         print("Weiter nach Gate 0b. Im Bericht: Gate 0 nach der vorab festgelegten Regel nicht bestanden; Abweichung vom Plan.")
 ''')
