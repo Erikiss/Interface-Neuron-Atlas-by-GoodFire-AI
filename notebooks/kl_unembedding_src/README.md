@@ -15,6 +15,8 @@ python build_nb2.py ../kl_unembedding_test.ipynb
 | `harness2.py` | Führt alle Notebook-Zellen im Testmodus aus; prüft erneutes Ausführen und Abbruch mit Fortsetzen |
 | `check_real_checkpoint.py` | Prüft Namen, Formen und Dtypes des echten Checkpoints, nur über die Dateikopfzeilen |
 | `dryrun_real_branch.py` | Trockenlauf der Modellzelle bis zum Download, mit nachgebildeter GPU |
+| `update_cell.py` | Zelle für eine laufende Sitzung mit der vorigen Fassung: holt die neue Fassung von GitHub, übernimmt das geladene Modell und rechnet ab Gate 0 weiter |
+| `test_update_cell.py` | Stellt eine solche Sitzung nach (vorige Fassung unter `snap/`, mitten in Gate 0 unterbrochen) und prüft die Zelle gegen einen frischen Lauf |
 
 ## Tests ausführen
 
@@ -25,6 +27,7 @@ python tiny_stream_test.py                                   # rund 30 Sekunden
 python harness2.py ../kl_unembedding_test.ipynb              # rund 7 Minuten
 python dryrun_real_branch.py ../kl_unembedding_test.ipynb
 python check_real_checkpoint.py                              # liest Kopfzeilen vom Hub
+python test_update_cell.py <Ergebnisdatei eines harness-Laufs> ../kl_unembedding_test.ipynb
 ```
 
 Diese lokalen Eingaben liegen nicht im Repo:
