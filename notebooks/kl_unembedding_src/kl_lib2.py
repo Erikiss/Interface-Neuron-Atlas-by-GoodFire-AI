@@ -10,11 +10,15 @@ Schichten wirkt.
 """
 import math
 import time
+import traceback
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors import safe_open
+
+
+LIB_VERSION = "2026-11-28"   # geht in die Signatur fertiger Läufe ein
 
 
 # ----------------------------------------------------------------------------- Modulzugriff
@@ -133,12 +137,36 @@ class RoutingControl:
 _LIVE_HOOKS = globals().get("_LIVE_HOOKS", [])
 
 
-def remove_neuron_hooks():
-    """Entfernt alle noch angemeldeten NeuronHook- und BlockInput-Hooks und liefert ihre Anzahl.
-    Nach einem abgebrochenen Lauf hängt ein Hook sonst weiter am Modell und kann spätere Läufe verändern."""
+def remove_neuron_hooks(model=None):
+    """Entfernt alle noch angemeldeten NeuronHook- und BlockInput-Hooks und liefert ihre Anzahl. Mit model werden
+    zusätzlich alle solchen Hooks am Modell gesucht, auch aus einer früheren Fassung dieser Bibliothek, die kein
+    Verzeichnis führte. Nach einem abgebrochenen Lauf hängt ein Hook sonst weiter am Modell."""
     n = len(_LIVE_HOOKS)
     for h in list(_LIVE_HOOKS):
         h.remove()
+    if model is not None:
+        n += _remove_model_hooks(model, ("NeuronHook.", "BlockInput."))
+    return n
+
+
+def remove_routing_hooks(model):
+    """Entfernt die Routing-Hooks aller RoutingControl-Objekte am Modell, auch aus einer früheren Fassung."""
+    return _remove_model_hooks(model, ("RoutingControl.",))
+
+
+def _remove_model_hooks(model, prefixes):
+    """Entfernt an MoE-Blöcken und Routern die Hooks, deren Funktion zu einer der genannten Klassen gehört."""
+    n = 0
+    for blk in text_model(model).layers:
+        mlp = getattr(blk, "mlp", None)
+        for mod in (mlp, getattr(mlp, "gate", None)):
+            if mod is None:
+                continue
+            for d in (mod._forward_hooks, mod._forward_pre_hooks):
+                for k, fn in list(d.items()):
+                    if getattr(getattr(fn, "__func__", fn), "__qualname__", "").startswith(prefixes):
+                        del d[k]
+                        n += 1
     return n
 
 
@@ -347,6 +375,29 @@ def family_max_null(W_U, gain, Wd, rows_list):
     return best, arg
 
 
+def save_json(path, obj):
+    """Schreibt JSON so, dass ein Abbruch keine halbe Datei hinterlässt (erst Hilfsdatei, dann umbenennen)."""
+    import json
+    import os
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def load_json(path):
+    """Liest eine JSON-Datei; None, wenn sie fehlt oder nicht lesbar ist."""
+    import json
+    import os
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
 def percentile_rank(values, x):
     """Anteil der Werte in values, die kleiner oder gleich x sind (0..1)."""
     v = torch.as_tensor(values).float().flatten()
@@ -367,6 +418,36 @@ def paired_bootstrap(d_by_pair, n_boot=5000, seed=1, lo_q=0.0125, hi_q=0.9875):
         boots.append(sum(per[rng.randrange(n)] for _ in range(n)) / n)
     boots.sort()
     return est, boots[int(lo_q * n_boot)], boots[min(n_boot - 1, int(hi_q * n_boot))]
+
+
+def calibration_fit(rows, crop_u=84):
+    """Gate 0b (nachträglich festgelegt am 28.11.2026): Übereinstimmung nur auf Fenstern, die am Textanfang beginnen.
+
+    Der Atlas zeigt je Feuerung bis zu 100 Token davor; abgeschnittene Fenster haben u = crop_u und lassen sich ohne den
+    Text davor nicht nachrechnen. rows: Einträge mit a (Modell, in theta), v (Atlas-Wert oder None), routed (Modell
+    wählt den Experten), pos (j - u) und left (j). Liefert n_slots, n_valued, pearson_r, slope_through_origin und
+    share_routing_ok (None, wo nicht berechenbar)."""
+    sel = [r for r in rows if r["left"] - r["pos"] < crop_u]
+    val = [r for r in sel if r["v"] is not None]
+    out = {"n_slots": len(sel), "n_valued": len(val), "pearson_r": None, "slope_through_origin": None,
+           "share_routing_ok": None}
+    if sel:
+        out["share_routing_ok"] = sum(r["routed"] == (r["v"] is not None) for r in sel) / len(sel)
+    if len(val) > 2:
+        A = torch.tensor([r["a"] for r in val], dtype=torch.float64)
+        V = torch.tensor([r["v"] for r in val], dtype=torch.float64)
+        r_ = float(torch.corrcoef(torch.stack([A, V]))[0, 1])
+        s_ = float((A * V).sum() / (V * V).sum().clamp_min(1e-30))
+        out["pearson_r"] = r_ if math.isfinite(r_) else None
+        out["slope_through_origin"] = s_ if math.isfinite(s_) else None
+    return out
+
+
+def calibration_b_ok(fit, r_min=0.99, slope=(0.95, 1.05), route_min=0.98):
+    """Entscheidung von Gate 0b aus calibration_fit."""
+    return bool(fit["pearson_r"] is not None and fit["slope_through_origin"] is not None
+                and fit["share_routing_ok"] is not None and fit["pearson_r"] >= r_min
+                and slope[0] <= fit["slope_through_origin"] <= slope[1] and fit["share_routing_ok"] >= route_min)
 
 
 def naive_kl_f32(logits_p, logits_q):
@@ -614,15 +695,14 @@ class LayerStreamer:
         else:
             for keys in progress(blocks, f"Vorberechnung: {len(todo)} Texte, blockweise", self.verbose):
                 self._prefill(keys)
-        self.stats["texts"] += len(todo)
         if self.verbose:
             print(f"Vorberechnung fertig: {len(todo)} Texte in {len(blocks)} Blöcken, "
                   f"{self.stats['layer_loads'] - loads0} Ladevorgänge unterer Schichten, {time.time() - t0:.0f} s", flush=True)
         return len(todo)
 
     def _padded(self, keys):
-        """Token-IDs eines Blocks als [Anzahl, größte Länge], rechts aufgefüllt. Das Auffüllen ändert die Werte
-        der echten Positionen nicht (kausale Rechnung, keine Abhängigkeit zwischen den Zeilen)."""
+        """Token-IDs eines Blocks als [Anzahl, größte Länge], rechts aufgefüllt. Auffüllen und die anderen Zeilen
+        ändern die Werte der echten Positionen nur im Rahmen der Rundung (kausale Rechnung, Zeilen unabhängig)."""
         ids = torch.full((len(keys), max(len(k) for k in keys)), self.pad_id, dtype=torch.long)
         for r, k in enumerate(keys):
             ids[r, :len(k)] = torch.tensor(k, dtype=torch.long)
@@ -645,6 +725,11 @@ class LayerStreamer:
             for p in plans:
                 for r, k in enumerate(p["keys"]):
                     self.cache[k] = p["h"][r:r + 1, :len(k)].clone()
+                self.stats["texts"] += len(p["keys"])
+                p["h"] = None                           # Blockzustand sofort freigeben
+        except BaseException as ex:
+            traceback.clear_frames(ex.__traceback__)    # die Fehlermeldung soll keine geladene Schicht festhalten
+            raise
         finally:                                        # auch nach einem Abbruch bleibt nichts auf dem Gerät hängen
             layer = None
             for p in plans:
@@ -661,14 +746,19 @@ class LayerStreamer:
         def stop(mod, args):
             raise _StopAfterSplit()
 
-        hook = self.text.layers[self.split].register_forward_pre_hook(stop)
-        self._modes("capture", "embed")
+        hook = None
         try:
+            hook = self.text.layers[self.split].register_forward_pre_hook(stop)
+            self._modes("capture", "embed")
             self.text(input_ids=ids, use_cache=False)
         except _StopAfterSplit:
             pass
+        except BaseException as ex:
+            traceback.clear_frames(ex.__traceback__)
+            raise
         finally:
-            hook.remove()
+            if hook is not None:
+                hook.remove()
             self._modes("pass", "inject")
             rec, self._rec = self._rec, None
         if rec["h"] is None or sorted(rec["kw"]) != list(range(self.split)):
@@ -691,22 +781,36 @@ class LayerStreamer:
             raise _StopAfterSplit()
 
         ids = self._padded(keys)
-        hook = self.text.layers[self.split].register_forward_pre_hook(grab)
-        self._modes("stream", "embed")
+        hook = None
         try:
+            hook = self.text.layers[self.split].register_forward_pre_hook(grab)
+            self._modes("stream", "embed")
             self.text(input_ids=ids, use_cache=False)
         except _StopAfterSplit:
             pass
+        except BaseException as ex:
+            traceback.clear_frames(ex.__traceback__)    # die Fehlermeldung soll keine geladene Schicht festhalten
+            raise
         finally:
-            hook.remove()
+            if hook is not None:
+                hook.remove()
             self._modes("pass", "inject")
         H = got["h"]
         for r, k in enumerate(keys):
             self.cache[k] = H[r:r + 1, :len(k)].clone()
+        self.stats["texts"] += len(keys)
         del got, H
 
     def gpu_gib(self):
         return torch.cuda.memory_allocated(self.device) / 2**30 if self.device.type == "cuda" else 0.0
+
+
+def check_session(rc, streamer):
+    """Bricht mit einer klaren Meldung ab, wenn Routing-Steuerung oder Modell noch aus einer früheren Fassung oder
+    einer früheren Ausführung der Bibliothekszelle stammen."""
+    if not isinstance(rc, RoutingControl) or not isinstance(streamer, LayerStreamer):
+        raise RuntimeError("Bitte zuerst die Modellzelle erneut ausführen. Sie lädt das Modell nicht neu, "
+                           "sondern übernimmt es für die jetzige Fassung der Bibliothek.")
 
 
 def adopt_streamer(st):

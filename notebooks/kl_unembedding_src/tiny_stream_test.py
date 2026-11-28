@@ -267,6 +267,38 @@ def run_sweep_tests(layer_types, split, label):
         same2 = all(torch.equal(C.cache[k], A.cache[k]) for k in A.cache)
         check(f"{label} S10 an interrupted sweep leaves the streamer clean; a second call completes",
               clean and n_again == len(seqs) and same2)
+        check(f"{label} S10b the text counter matches the cache after interrupt and retry",
+              C.stats["texts"] == len(C.cache) and A.stats["texts"] == len(A.cache),
+              f"counted {C.stats['texts']}, cached {len(C.cache)}")
+
+        # S16: Abbruch mitten in einer unteren Schicht; die Ausnahme wird aufbewahrt (wie IPython es tut).
+        # Die geladene Schicht darf trotzdem nicht im Speicher bleiben.
+        import gc
+        import weakref
+        G = fresh(True)
+        orig_g, refs = G.build_layer, []
+
+        def build_and_arm(i):
+            layer = orig_g(i)
+            if i == split - 1:
+                refs.append(weakref.ref(layer))
+
+                def boom(mod, args):
+                    raise KeyboardInterrupt()
+
+                layer.mlp.register_forward_pre_hook(boom)
+            return layer
+
+        G.build_layer = build_and_arm
+        kept = None
+        try:
+            G.ensure(seqs)
+        except KeyboardInterrupt as ex:
+            kept = ex
+        gc.collect()
+        check(f"{label} S16 after an interrupt inside a lower layer, the kept exception does not hold the layer",
+              kept is not None and len(refs) == 1 and refs[0]() is None and len(G.cache) == 0)
+        del kept
 
         # S11: kleines Budget -> ein Durchlauf je Block, gleiche Ergebnisse
         D = fresh(True)
@@ -363,6 +395,27 @@ def run_adopt_tests(layer_types, split, label):
                   types_ok and kept and n_new == 2 and worst < 1e-4 and refused
                   and S2.stats["layer_loads"] - loads_before == split,
                   f"max diff {worst:.1e}, new lower-layer loads {S2.stats['layer_loads'] - loads_before}")
+
+            # S15: Hooks, die Objekte der anderen Fassung am Modell hinterlassen haben, werden gefunden und entfernt
+            RC_old = OLD.RoutingControl(S2.model)
+            OLD.NeuronHook(S2.model, split, 0, 0, RC_old).record = True     # wie nach einem Abbruch: hängt weiter
+            OLD.BlockInput(S2.model, split)
+            mlp = K.moe_block(S2.model, split)
+            gates = [K.moe_block(S2.model, i).gate for i in range(split, len(layer_types))]
+            before = (len(mlp._forward_hooks) + len(mlp._forward_pre_hooks), sum(len(g._forward_hooks) for g in gates))
+            n_neuron = K.remove_neuron_hooks(S2.model)
+            n_route = K.remove_routing_hooks(S2.model)
+            after = (len(mlp._forward_hooks) + len(mlp._forward_pre_hooks), sum(len(g._forward_hooks) for g in gates))
+            RC_new = K.RoutingControl(S2.model)
+            t = torch.tensor(seqs[0])
+            hook = K.NeuronHook(S2.model, split, 0, 0, RC_new)
+            a1, _ = K.activation_at(S2.model, hook, RC_new, t)
+            hook.remove()
+            RC_new.remove()
+            check(f"{label} S15 hooks left by the {tag} are removed; the model works afterwards",
+                  before == (3, len(gates)) and after == (0, 0) and n_neuron == 3 and n_route == len(gates)
+                  and a1.shape[0] == len(seqs[0]),
+                  f"block hooks before/after {before[0]}/{after[0]}, gate hooks before/after {before[1]}/{after[1]}")
 
 
 if __name__ == "__main__":
